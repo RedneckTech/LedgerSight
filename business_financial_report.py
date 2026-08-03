@@ -189,6 +189,12 @@ date = "2025-01-15"
 amount = 10000
 description = "Initial capital contribution"
 
+# Merchant name normalization — collapses variants of the same vendor
+# before category rules are applied.  Glob patterns with * are supported.
+[merchant_aliases]
+"BIG TRAILER RENT*" = "Big Trailer Rent"
+"DAT SOLUTIONS*" = "DAT Solutions"
+
 # Custom transaction category rules
 # Each rule has: pattern (regex), category, tax_category, deductibility, direction
 # Rules are evaluated in order; first match wins.
@@ -423,6 +429,7 @@ class BusinessConfig:
     loans: list[dict] = field(default_factory=list)
     owner_activities: list[dict] = field(default_factory=list)
     document_checklist: dict[str, str] = field(default_factory=dict)
+    merchant_aliases: dict[str, str] = field(default_factory=dict)
 
     def masked_ein(self) -> str:
         if self.mask_ein and self.ein_display:
@@ -1323,9 +1330,11 @@ def _get_default_tax_category(business_cat: str) -> str:
 class TransactionCategorizer:
     """Categorizes transactions using ordered category rules."""
 
-    def __init__(self, custom_rules: list[CategoryRule] | None = None):
+    def __init__(self, custom_rules: list[CategoryRule] | None = None,
+                 merchant_aliases: dict[str, str] | None = None):
         self.default_rules = build_default_rules()
         self.custom_rules = custom_rules or []
+        self.merchant_aliases = merchant_aliases or {}
         self._build_combined_rules()
 
     def _build_combined_rules(self):
@@ -1341,7 +1350,15 @@ class TransactionCategorizer:
         a rule with direction="debit" is skipped for credit transactions.
         Mismatched-direction rules never clear the CPA-review flag.
         """
-        desc_upper = transaction.description.upper()
+        desc = transaction.description
+        # Apply merchant aliases to normalize vendor names before rule matching
+        if self.merchant_aliases:
+            desc_upper = desc.upper()
+            for pattern, replacement in self.merchant_aliases.items():
+                if _alias_glob_match(desc_upper, pattern.upper()):
+                    desc = replacement
+                    break
+        desc_upper = desc.upper()
         for rule in self._rules:
             try:
                 # ---- Direction check ----
@@ -1625,7 +1642,17 @@ def build_pl(
     Non-P&L transactions are routed to separate accounting buckets
     (owner, loan, transfers, fixed assets) rather than combined into
     generic credit/debit totals.
+
+    Payment reversals are matched against original debits by merchant
+    name so the corresponding expense category is reduced.
     """
+    # Pre-build a lookup of debit transactions by merchant for reversal matching
+    debit_by_merchant: dict[str, list[Transaction]] = {}
+    for tx in transactions:
+        if not tx.is_credit and not tx.is_transfer:
+            m = normalize_merchant(tx.description)
+            debit_by_merchant.setdefault(m, []).append(tx)
+
     pl = ProfitAndLoss(label=label)
     for tx in transactions:
         cat = tx.business_category
@@ -1649,7 +1676,7 @@ def build_pl(
                 pl.owner_distributions += tx.amount
             continue
 
-        # ---- Loan proceeds / principal / reversals (excluded from P&L) ----
+        # ---- Loan proceeds / principal (excluded from P&L) ----
         if tx.is_loan and not tx.include_in_pnl:
             if tx.is_credit:
                 pl.loan_proceeds += tx.amount
@@ -1657,8 +1684,24 @@ def build_pl(
                 pl.loan_principal_payments += tx.amount
             continue
 
-        # ---- Payment reversals (NSF returns — not necessarily loan-related) ----
-        if cat == "Payment Reversal":
+        # ---- Payment reversals — try to match to original expense ----
+        if cat == "Payment Reversal" and tx.is_credit:
+            merchant = normalize_merchant(tx.description)
+            matched = debit_by_merchant.get(merchant) or []
+            if matched:
+                orig_cat = matched[0].business_category
+                if orig_cat in _DIRECT_COST_CATS:
+                    pl.direct_costs[orig_cat] -= tx.amount
+                elif orig_cat in _OP_EXPENSE_CATS:
+                    pl.operating_expenses[orig_cat] -= tx.amount
+                elif orig_cat in _INCOME_CAT_SET:
+                    pl.revenue[orig_cat] -= tx.amount
+                else:
+                    pl.payment_reversals += tx.amount
+            else:
+                pl.payment_reversals += tx.amount
+            continue
+        elif cat == "Payment Reversal":
             pl.payment_reversals += tx.amount
             continue
 
@@ -2396,6 +2439,9 @@ class ReportPDF(FPDF):
         self.set_auto_page_break(auto=True, margin=18)
         self.set_margins(12, 12, 12)
         self._setup_fonts()
+        self.set_title(title)
+        self.set_author("LedgerSight")
+        self.set_subject("Business Financial Report")
 
     def _setup_fonts(self):
         if os.path.exists(self.DEJAVU_SANS):
@@ -2413,7 +2459,7 @@ class ReportPDF(FPDF):
             return
         self.set_font("DJV", "I", 7)
         self.set_text_color(120, 120, 120)
-        title_short = self._report_title[:60]
+        title_short = self._report_title[:80]
         self.cell(0, 4, title_short, align="L")
         self.cell(0, 4, f"Page {self.page_no()}", align="R", new_x="LMARGIN", new_y="NEXT")
         self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
@@ -2436,6 +2482,7 @@ class ReportPDF(FPDF):
         self.set_draw_color(44, 62, 80)
         self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
         self.ln(4)
+        self.start_section(text)
 
     def sub_title(self, text: str):
         self.set_font("DJV", "B", 11)
@@ -2672,8 +2719,15 @@ class ReportBuilder:
                 "insufficient or too many transactions remain under CPA review. "
                 "Re-run after categorizing more transactions to enable projections."
             )
-        elif self.projection_status == "not_requested":
-            pass
+        elif self.mode in ("combined", "yearly"):
+            pdf.ln(4)
+            pdf.set_font("DJV", "I", 8)
+            pdf.set_text_color(130, 130, 130)
+            pdf.multi_cell(
+                0, 4,
+                "Financial projections not requested. "
+                "Use --projections to include forward-looking estimates."
+            )
 
         if self.mode in ("combined", "yearly"):
             self._transaction_detail(pdf)
@@ -2738,6 +2792,13 @@ class ReportBuilder:
         pdf.set_font("DJV", "I", 8)
         pdf.set_text_color(150, 150, 150)
         pdf.cell(0, 5, _PNL_DISCLAIMER, align="C", new_x="LMARGIN", new_y="NEXT")
+        # Partial-year warning if fewer than 12 months
+        if len(self.statements) < 12:
+            pdf.set_font("DJV", "B", 8)
+            pdf.set_text_color(180, 120, 40)
+            pdf.cell(0, 5,
+                     f"Partial-year report — {12 - len(self.statements)} month(s) not included",
+                     align="C", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(8)
 
         # Summary box
@@ -2852,6 +2913,36 @@ class ReportBuilder:
             "report that includes non-P&L transactions (transfers, owner contributions, "
             "loan activity, fixed-asset purchases)."
         )
+
+        # Classification quality box
+        total_tx = sum(len(s.transactions) for s in self.statements)
+        cpa_review_count = sum(
+            1 for s in self.statements for tx in s.transactions if tx.cpa_review
+        )
+        classified_count = total_tx - cpa_review_count
+        classified_pct = (classified_count / max(total_tx, 1)) * 100
+        unclass_credits = sum(
+            tx.amount for s in self.statements for tx in s.transactions
+            if tx.cpa_review and tx.is_credit
+        )
+        unclass_debits = sum(
+            tx.amount for s in self.statements for tx in s.transactions
+            if tx.cpa_review and not tx.is_credit
+        )
+        pnl_status = "Preliminary — classification incomplete" if classified_pct < 80 else "Substantially classified"
+        if classified_pct < 50:
+            pnl_status = "Highly Preliminary — majority unclassified"
+
+        pdf.ln(4)
+        pdf.sub_title("Classification Quality")
+        class_rows = [
+            ("Transactions Classified", f"{classified_count} of {total_tx} ({classified_pct:.0f}%)"),
+            ("Transactions Requiring Review", str(cpa_review_count)),
+            ("Unclassified Credits", fmt_dollar(unclass_credits)),
+            ("Unclassified Debits", fmt_dollar(unclass_debits)),
+            ("P&L Status", pnl_status),
+        ]
+        pdf.draw_kv_table(class_rows)
 
     def _data_quality(self, pdf: ReportPDF):
         pdf.add_page()
@@ -3059,7 +3150,8 @@ class ReportBuilder:
         sorted_cats = sorted(all_cats, key=lambda x: f"{x[0]}{x[1]}")
 
         month_labels_short = [datetime.strptime(k, "%Y-%m").strftime("%b %y") for k in keys]
-        headers = ["Category"] + month_labels_short + ["YTD Total"]
+        period_label = "YTD Total" if len(keys) >= 12 else f"Period Total ({keys[0][:7]} to {keys[-1][:7]})"
+        headers = ["Category"] + month_labels_short + [period_label]
         cw_first = 40
         cw_month = (pdf.w - pdf.l_margin - pdf.r_margin - cw_first) / (len(keys) + 1)
         cw = [cw_first] + [cw_month] * (len(keys) + 1)
@@ -3108,7 +3200,7 @@ class ReportBuilder:
 
         # Summary line
         pdf.sub_title("Profit Summary")
-        sum_headers = ["Metric"] + month_labels_short + ["YTD Total"]
+        sum_headers = ["Metric"] + month_labels_short + [period_label]
         sum_rows = [
             ["Gross Profit"] + [fmt_dollar(self.monthly_pls[k].gross_profit) for k in keys]
             + [fmt_dollar(sum((self.monthly_pls[k].gross_profit for k in keys), Decimal("0")))],
@@ -3409,25 +3501,55 @@ class ReportBuilder:
         pdf.add_page()
         pdf.section_title("Financial Ratios and Key Performance Indicators")
         kpi = self.kpis
+
+        total_tx = sum(len(s.transactions) for s in self.statements)
+        cpa_review_count = sum(
+            1 for s in self.statements for tx in s.transactions if tx.cpa_review
+        )
+        classified_pct = ((total_tx - cpa_review_count) / max(total_tx, 1)) * 100
+        preliminary = classified_pct < 80
+
+        if preliminary:
+            pdf.set_font("DJV", "B", 8)
+            pdf.set_text_color(180, 60, 60)
+            pdf.multi_cell(
+                0, 4.5,
+                f"WARNING: Only {classified_pct:.0f}% of transactions are classified. "
+                f"KPIs below are based on currently classified data and may change materially."
+            )
+            pdf.ln(3)
+
+        margin_label = "Gross Margin*" if preliminary else "Gross Margin"
+        op_margin_label = "Operating Margin*" if preliminary else "Operating Margin"
+        net_margin_label = "Net Margin*" if preliminary else "Net Margin"
+        runway_label = ("Bank-Account Runway (classified expenses only)"
+                        if preliminary else "Cash Runway Estimate (months)")
+        avg_rev_label = "Avg Monthly Revenue*" if preliminary else "Avg Monthly Revenue"
+        avg_exp_label = "Avg Monthly Expenses*" if preliminary else "Avg Monthly Expenses"
+        avg_net_label = "Avg Monthly Net Profit*" if preliminary else "Avg Monthly Net Profit"
+
         rows = [
-            ("Gross Margin", kpi.gross_margin),
-            ("Operating Margin", kpi.operating_margin),
-            ("Net Margin", kpi.net_margin),
+            (margin_label, kpi.gross_margin),
+            (op_margin_label, kpi.operating_margin),
+            (net_margin_label, kpi.net_margin),
             ("Expense-to-Revenue Ratio", kpi.expense_to_revenue),
-            ("Avg Monthly Revenue", fmt_dollar(kpi.avg_monthly_revenue)),
-            ("Avg Monthly Expenses", fmt_dollar(kpi.avg_monthly_expenses)),
-            ("Avg Monthly Net Profit", fmt_dollar(kpi.avg_monthly_net)),
+            (avg_rev_label, fmt_dollar(kpi.avg_monthly_revenue)),
+            (avg_exp_label, fmt_dollar(kpi.avg_monthly_expenses)),
+            (avg_net_label, fmt_dollar(kpi.avg_monthly_net)),
             ("Average Transaction Value", fmt_dollar(kpi.avg_transaction_value)),
             ("Largest Bank Credit", fmt_dollar(kpi.largest_income)),
             ("Largest Bank Debit", fmt_dollar(kpi.largest_expense)),
             ("Min Monthly Balance", fmt_dollar(kpi.min_monthly_balance)),
             ("Max Monthly Balance", fmt_dollar(kpi.max_monthly_balance)),
-            ("Cash Runway Estimate (months)", kpi.cash_runway_months),
+            (runway_label, kpi.cash_runway_months),
             ("Total Revenue", fmt_dollar(kpi.total_revenue)),
             ("Total Expenses", fmt_dollar(kpi.total_expenses)),
             ("Net Income (Cash Basis)", fmt_dollar(kpi.net_income)),
         ]
         pdf.draw_kv_table(rows)
+
+        if preliminary:
+            pdf.body_text_small("* Preliminary — based on currently classified transactions only.")
 
     def _projections(self, pdf: ReportPDF):
         if not self.projections:
@@ -3653,6 +3775,47 @@ class ReportBuilder:
         pdf.section_title("Page 2: Tax Summary")
         pdf.body_text_small("Cash-basis summary from bank statements. Not a filed tax return.")
         pl = self.pl
+
+        total_tx = sum(len(s.transactions) for s in self.statements)
+        cpa_review_count = sum(
+            1 for s in self.statements for tx in s.transactions if tx.cpa_review
+        )
+        classification_pct = (cpa_review_count / max(total_tx, 1)) * 100
+        partial_year = len(self.statements) < 12
+        classification_low = classification_pct > 50 or partial_year
+
+        unclass_credits = pl.uncategorized_non_pnl_credits
+        unclass_debits = pl.uncategorized_non_pnl_debits
+
+        reserve_withheld = (
+            classification_low
+            or (pl.net_profit <= 0)
+            or unclass_credits > pl.total_revenue * Decimal("2")
+            or unclass_debits > (pl.total_direct_costs + pl.total_operating_expenses) * Decimal("2")
+        )
+
+        if reserve_withheld:
+            reasons = []
+            if partial_year:
+                reasons.append("partial-year report")
+            if classification_pct > 50:
+                reasons.append("classification incomplete")
+            if unclass_credits > pl.total_revenue * Decimal("2"):
+                reasons.append("unclassified credits exceed classified revenue")
+            if unclass_debits > (pl.total_direct_costs + pl.total_operating_expenses) * Decimal("2"):
+                reasons.append("unclassified debits exceed classified expenses")
+            if not reasons:
+                reasons.append("net loss — no reserve needed")
+            reserve_label = f"Tax reserve withheld — {'; '.join(reasons)}"
+            reserve_val = Decimal("0")
+        else:
+            reserve_pct = Decimal(str(
+                self.config.projection_config.get("tax_reserve_pct", 0.25)
+                if self.config.projection_config else 0.25
+            ))
+            reserve_label = f"Estimated Tax Reserve ({float(reserve_pct) * 100:.0f}%)"
+            reserve_val = pl.net_profit * reserve_pct
+
         rows = [
             ("Total Gross Receipts / Revenue", fmt_dollar(pl.total_revenue)),
             ("Cost of Goods Sold / Direct Costs", fmt_dollar(pl.total_direct_costs)),
@@ -3662,13 +3825,7 @@ class ReportBuilder:
             ("Interest Expense", fmt_dollar(pl.total_other_expense)),
             ("Net Cash-Basis Profit (Loss)", fmt_dollar(pl.net_profit)),
             ("", ""),
-            ("Estimated Tax Reserve ({:.0f}%)".format(
-                float(self.config.projection_config.get("tax_reserve_pct", 0.25)) * 100
-                if self.config.projection_config else 25),
-             fmt_dollar(pl.net_profit * Decimal(str(
-                 self.config.projection_config.get("tax_reserve_pct", 0.25)
-                 if self.config.projection_config else 0.25
-             )) if pl.net_profit > 0 else Decimal("0"))),
+            (reserve_label, fmt_dollar(reserve_val) if reserve_val else "-"),
             ("", ""),
             ("Non-Income/Expense Items:", ""),
             ("Owner Contributions", fmt_dollar(pl.owner_contributions)),
@@ -3812,6 +3969,24 @@ class ReportBuilder:
         else:
             pdf.body_text_small("No large deposits detected.")
 
+        # Factoring / settlement note
+        has_factoring_like = any(
+            "APEX" in tx.description.upper() or "FACTOR" in tx.description.upper()
+            for s in self.statements for tx in s.transactions
+            if tx.is_credit
+        )
+        if has_factoring_like:
+            pdf.ln(4)
+            pdf.set_font("DJV", "B", 8)
+            pdf.set_text_color(180, 120, 40)
+            pdf.multi_cell(
+                0, 4.5,
+                "Note: Incoming wires from factoring or settlement companies may "
+                "represent net funding rather than gross revenue. Factoring fees, "
+                "reserve withholdings, releases, chargebacks, and adjustments should "
+                "be reconciled against settlement reports before final tax filing."
+            )
+
     def _cpa_deduction_detail(self, pdf: ReportPDF):
         pdf.add_page()
         pdf.section_title("Page 5: Potential Deduction Detail")
@@ -3876,19 +4051,43 @@ class ReportBuilder:
                            section_label="Fixed Asset Candidates")
 
         if other:
-            pdf.sub_title("Other Large Transactions Requiring Review")
+            pdf.sub_title("Other Large Transactions — Not Suggested as Assets")
+            oth_headers = ["Date", "Vendor", "Description", "Amount", "Likely Reason", "CPA Note"]
             oth_rows = []
             for tx in other[:30]:
+                cat = tx.business_category
+                if tx.is_loan or cat in ("Loan Proceeds", "Loan Principal Payment", "Loan Interest"):
+                    reason = "Loan/Financing"
+                elif tx.is_owner_related or cat in ("Owner Contribution", "Owner Draw or Distribution"):
+                    reason = "Owner Activity"
+                elif "Insurance" in cat or "PROG" in tx.description.upper():
+                    reason = "Insurance Payment"
+                elif cat in ("Fuel",):
+                    reason = "Fuel Purchase"
+                elif "Rent" in cat or "Lease" in cat:
+                    reason = "Rent/Lease"
+                elif cat in ("Repairs and Maintenance", "Equipment Maintenance", "Vehicle Expense"):
+                    reason = "Repair/Maintenance"
+                elif tx.is_transfer or cat in ("Account Transfer", "Credit Card Payment"):
+                    reason = "Account Transfer"
+                elif cat in ("Payroll", "Payroll Taxes"):
+                    reason = "Payroll"
+                elif cat == "Bank and Merchant Fees":
+                    reason = "Bank Fees"
+                elif cat in ("Software and Cloud Services", "Telephone and Internet"):
+                    reason = "Technology/Utilities"
+                else:
+                    reason = "Unidentified — CPA review"
                 note = "CPA review" if tx.amount >= Decimal("2500") else "Review"
                 oth_rows.append([
                     tx.post_date,
                     normalize_merchant(tx.description)[:25],
                     self._mask_text(tx.description)[:35],
                     fmt_dollar(tx.amount),
-                    "Review needed",
+                    reason,
                     note,
                 ])
-            pdf.draw_table(headers, oth_rows, col_widths=cw,
+            pdf.draw_table(oth_headers, oth_rows, col_widths=cw,
                            col_aligns=["L", "L", "L", "R", "L", "L"],
                            section_label="Other Large Transactions")
 
@@ -4324,6 +4523,24 @@ class ReportBuilder:
 # =============================================================================
 
 
+def _alias_glob_match(text: str, pattern: str) -> bool:
+    """Simple glob-style match: * matches any sequence.  Case-sensitive."""
+    if pattern == "*":
+        return True
+    parts = pattern.split("*")
+    if len(parts) == 1:
+        return text == parts[0]
+    if not text.startswith(parts[0]):
+        return False
+    idx = len(parts[0])
+    for part in parts[1:-1]:
+        pos = text.find(part, idx)
+        if pos == -1:
+            return False
+        idx = pos + len(part)
+    return text.endswith(parts[-1]) if parts[-1] else True
+
+
 _FIXED_ASSET_EXCLUDED_CATS: set[str] = {
     "Payroll", "Payroll Taxes", "Bank and Merchant Fees",
     "Business Insurance", "Rent or Lease",
@@ -4641,6 +4858,7 @@ def load_config(config_path: Path, was_explicit: bool = False) -> BusinessConfig
         config.loans = data.get("loans", [])
         config.owner_activities = data.get("owner_activity", [])
         config.document_checklist = data.get("document_checklist", {})
+        config.merchant_aliases = data.get("merchant_aliases", {})
 
         logger.info("Business: %s", config.display_name())
         logger.info("Entity type: %s", config.entity_type)
@@ -4782,7 +5000,7 @@ def build_report(
     # Deduplicate by file hash (handled during loading)
 
     # Setup categorizer
-    categorizer = TransactionCategorizer(config.custom_rules)
+    categorizer = TransactionCategorizer(config.custom_rules, config.merchant_aliases)
     categorizer.categorize_all(statements)
     categorizer.mark_credit_deposits(statements)
 
