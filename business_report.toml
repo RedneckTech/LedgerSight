@@ -1,0 +1,167 @@
+# Business Financial Report Configuration
+# Placeholder values — replace with your own business data.
+
+[general]
+business_name = "Acme Transport LLC"
+dba = "Acme Transport"
+address = "123 Main St, Anytown ST 00000"
+phone = "555-555-1212"
+email = "contact@example.com"
+tax_year = 2025
+fiscal_year_start = 1  # 1 = January
+entity_type = "single-member-llc"  # sole-prop, single-member-llc, partnership, s-corp, c-corp, other
+accounting_method = "cash"  # cash or accrual
+ein_display = "XX-XXXXXXX"
+mask_ein = true
+bank_account_display = "CLASSIC BUSINESS CHECKING - XXXX0000"
+mask_account = true
+industry = "trucking"
+currency = "USD"
+
+[cpa]
+name = "Jane Smith, CPA"
+firm = "Smith & Associates, CPAs"
+email = "jane@smithcpa.example.com"
+phone = "555-555-3000"
+
+[owner]
+owners = ["John Doe"]
+
+[projections]
+monthly_revenue_growth = 0.03  # 3%
+monthly_expense_inflation = 0.02  # 2%
+cogs_percentage = 0.35  # 35% of revenue
+payroll_growth = 0.02  # 2%
+lookback_months = 6
+projection_months = 12
+min_cash_balance = 5000.0
+tax_reserve_pct = 0.25  # 25% of net income
+one_time_revenue = []
+one_time_expenses = []
+planned_equipment = []
+
+# Seasonal multipliers (1.0 = no adjustment)
+[projections.seasonal]
+1 = 0.85
+2 = 0.90
+3 = 0.95
+4 = 1.05
+5 = 1.10
+6 = 1.15
+7 = 1.10
+8 = 1.05
+9 = 1.00
+10 = 0.95
+11 = 0.90
+12 = 0.85
+
+# Three scenarios (growth rates override monthly_revenue_growth)
+[projections.scenarios.conservative]
+monthly_revenue_growth = 0.01
+
+[projections.scenarios.base]
+monthly_revenue_growth = 0.03
+
+[projections.scenarios.growth]
+monthly_revenue_growth = 0.06
+
+# Beginning balance sheet (optional)
+[balances]
+beginning_cash = 0
+beginning_accounts_receivable = 0
+beginning_inventory = 0
+beginning_fixed_assets = 0
+beginning_accumulated_depreciation = 0
+beginning_accounts_payable = 0
+beginning_loan_balances = 0
+beginning_owner_equity = 0
+
+# Known fixed assets
+[[fixed_assets]]
+name = "2020 Freightliner Cascadia"
+purchase_date = "2020-06-15"
+cost = 85000
+asset_class = "5-year"
+
+# Known loans
+[[loans]]
+lender = "Equipment Finance Co"
+original_amount = 70000
+current_balance = 45000
+monthly_payment = 1850
+interest_rate = 0.065
+description_keywords = ["EQUIPMENT FINANCE"]
+
+# Owner activity
+[[owner_activity]]
+type = "contribution"
+date = "2025-01-15"
+amount = 10000
+description = "Initial capital contribution"
+
+# Custom transaction category rules
+# Each rule has: pattern (regex), category, tax_category, deductibility, direction
+# Rules are evaluated in order; first match wins.
+# direction: "credit", "debit", or "either" — mismatched-direction transactions are skipped
+[[rules]]
+pattern = "APEX CAPITAL CORP"
+category = "Service Revenue"
+tax_category = "Gross Receipts"
+deductibility = "not-applicable"
+direction = "credit"
+is_income = true
+
+[[rules]]
+pattern = "PILOT|FLYING J|LOVE'?S|KWIK STAR|CASEYS|MARATHON|TA\\s+#?\\d*\\s+[A-Z]{3}"
+category = "Fuel"
+tax_category = "Vehicle Fuel"
+deductibility = "likely-deductible"
+direction = "debit"
+
+[[rules]]
+pattern = "ALLIANT ENERGY|ALLPAID"
+category = "Utilities"
+tax_category = "Utilities"
+deductibility = "likely-deductible"
+direction = "debit"
+
+[[rules]]
+pattern = "WEB XFER|ZELLE|PAYPAL INST XFER"
+category = "Account Transfer"
+tax_category = "non-pl"
+deductibility = "not-applicable"
+direction = "either"
+
+[[rules]]
+pattern = "CHECK #"
+category = "Uncategorized"
+tax_category = "CPA Review"
+deductibility = "unknown"
+direction = "debit"
+
+# Document checklist for CPA package
+[document_checklist]
+bank_statements = "provided"
+credit_card_statements = "not-provided"
+loan_statements = "not-provided"
+payroll_reports = "not-provided"
+quarterly_payroll_filings = "not-provided"
+forms_w2 = "not-provided"
+forms_1099 = "not-provided"
+contractor_w9 = "not-provided"
+sales_tax_filings = "not-provided"
+prior_year_tax_return = "not-provided"
+fixed_asset_docs = "not-provided"
+vehicle_docs = "not-provided"
+mileage_logs = "not-provided"
+insurance_statements = "not-provided"
+merchant_processor_reports = "not-provided"
+ar_records = "not-provided"
+ap_records = "not-provided"
+inventory_records = "not-provided"
+owner_contribution_records = "not-provided"
+owner_distribution_records = "not-provided"
+estimated_tax_confirmations = "not-provided"
+business_license = "not-provided"
+home_office_records = "not-provided"
+health_insurance_docs = "not-provided"
