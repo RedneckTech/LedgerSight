@@ -74,6 +74,16 @@ _QUARTER_MONTHS: dict[int, list[int]] = {
     4: [10, 11, 12],
 }
 
+
+def _fiscal_quarter_months(quarter: int, fiscal_year_start: int = 1) -> list[int]:
+    """Return the calendar months for a given fiscal quarter.
+
+    fiscal_year_start is the calendar month (1-12) that begins the fiscal year.
+    """
+    fy_start_0 = (fiscal_year_start - 1) % 12  # zero-based
+    q_start_0 = fy_start_0 + (quarter - 1) * 3
+    return [(q_start_0 + i) % 12 + 1 for i in range(3)]
+
 # =============================================================================
 # Example TOML Configuration
 # =============================================================================
@@ -111,14 +121,14 @@ owners = ["John Doe"]
 monthly_revenue_growth = 0.03  # 3%
 monthly_expense_inflation = 0.02  # 2%
 cogs_percentage = 0.35  # 35% of revenue
-payroll_growth = 0.02  # 2%
+payroll_growth = 0.02  # 2% (reserved for future use)
 lookback_months = 6
 projection_months = 12
 min_cash_balance = 5000.0
 tax_reserve_pct = 0.25  # 25% of net income
-one_time_revenue = []
-one_time_expenses = []
-planned_equipment = []
+one_time_revenue = []  # reserved for future use
+one_time_expenses = []  # reserved for future use
+planned_equipment = []  # reserved for future use
 
 # Seasonal multipliers (1.0 = no adjustment)
 [projections.seasonal]
@@ -145,7 +155,7 @@ monthly_revenue_growth = 0.03
 [projections.scenarios.growth]
 monthly_revenue_growth = 0.06
 
-# Beginning balance sheet (optional)
+# Beginning balance sheet (reserved for future use — not yet integrated into reports)
 [balances]
 beginning_cash = 0
 beginning_accounts_receivable = 0
@@ -156,14 +166,14 @@ beginning_accounts_payable = 0
 beginning_loan_balances = 0
 beginning_owner_equity = 0
 
-# Known fixed assets
+# Known fixed assets (reserved for future integration)
 [[fixed_assets]]
 name = "2020 Freightliner Cascadia"
 purchase_date = "2020-06-15"
 cost = 85000
 asset_class = "5-year"
 
-# Known loans
+# Known loans (reserved for future integration)
 [[loans]]
 lender = "Equipment Finance Co"
 original_amount = 70000
@@ -172,7 +182,7 @@ monthly_payment = 1850
 interest_rate = 0.065
 description_keywords = ["EQUIPMENT FINANCE"]
 
-# Owner activity
+# Owner activity (reserved for future integration)
 [[owner_activity]]
 type = "contribution"
 date = "2025-01-15"
@@ -286,6 +296,7 @@ class Transaction:
     is_loan: bool = False
     source_statement: str = ""
     user_note: str = ""
+    sequence: int = 0
 
     @property
     def signed_amount(self) -> Decimal:
@@ -557,7 +568,7 @@ def find_pdfs(directory: Path) -> list[Path]:
     """Find all PDF files in a directory, excluding the generated report."""
     pdfs = []
     exclude_patterns = [
-        "bank_report", "business_financial_report",
+        "personal_financial_report", "business_financial_report",
     ]
     for p in sorted(directory.iterdir()):
         if not p.suffix.lower() == ".pdf":
@@ -572,6 +583,17 @@ def find_pdfs(directory: Path) -> list[Path]:
 def file_hash(path: Path) -> str:
     """SHA-256 hash of a file."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _parse_daily_date(date_str: str) -> date | None:
+    """Parse a daily-balance date string like '01/15/2023' to a date object."""
+    if not date_str:
+        return None
+    try:
+        parts = date_str.split("/")
+        return date(int(parts[2]), int(parts[0]), int(parts[1]))
+    except (ValueError, IndexError):
+        return None
 
 
 # =============================================================================
@@ -762,6 +784,7 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
 
     # ---- Account Activity (section-aware extraction) ----
     transactions: list[Transaction] = []
+    tx_seq = 0
     in_activity = False
     activity_started = False
     header_positions: dict[str, int] = {}
@@ -889,6 +912,7 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
                 description = _clean_description(description)
                 desc_buffer.clear()
 
+            tx_seq += 1
             transactions.append(Transaction(
                 post_date=post_date,
                 description=description,
@@ -897,6 +921,7 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
                 is_credit=is_credit,
                 balance=balance,
                 source_statement=file_path,
+                sequence=tx_seq,
             ))
 
             # After parsing the transaction line, check whether this
@@ -1703,16 +1728,32 @@ def build_monthly_pls(statements: list[Statement]) -> dict[str, ProfitAndLoss]:
     return result
 
 
-def build_quarterly_pls(statements: list[Statement]) -> dict[int, ProfitAndLoss]:
-    """Build quarterly P&L statements keyed by quarter number (1-4)."""
-    quarterly: dict[int, list[Transaction]] = defaultdict(list)
+def build_quarterly_pls(
+    statements: list[Statement],
+    fiscal_year_start: int = 1,
+) -> dict[tuple[int, int], ProfitAndLoss]:
+    """Build quarterly P&L statements keyed by (fiscal_year, quarter).
+
+    *fiscal_year_start* is the calendar month (1-12) that begins the fiscal year.
+    """
+    quarterly: dict[tuple[int, int], list[Transaction]] = defaultdict(list)
     for stmt in statements:
         for tx in stmt.transactions:
-            q = (int(tx.post_date.split("/")[0]) - 1) // 3 + 1
-            quarterly[q].append(tx)
-    result = {}
-    for q, txs in sorted(quarterly.items()):
-        result[q] = build_pl(txs, label=f"Q{q}")
+            parts = tx.post_date.split("/")
+            cal_month = int(parts[0])
+            cal_year = int(parts[2])
+            # Determine fiscal year and fiscal quarter
+            if cal_month >= fiscal_year_start:
+                fy = cal_year
+                fy_month = cal_month - fiscal_year_start + 1
+            else:
+                fy = cal_year - 1
+                fy_month = cal_month + (12 - fiscal_year_start + 1)
+            fq = (fy_month - 1) // 3 + 1
+            quarterly[(fy, fq)].append(tx)
+    result: dict[tuple[int, int], ProfitAndLoss] = {}
+    for (fy, fq), txs in sorted(quarterly.items()):
+        result[(fy, fq)] = build_pl(txs, label=f"FY{fy} Q{fq}")
     return result
 
 
@@ -2554,7 +2595,7 @@ class ReportBuilder:
         categorizer: TransactionCategorizer,
         pl: ProfitAndLoss,
         monthly_pls: dict[str, ProfitAndLoss],
-        quarterly_pls: dict[int, ProfitAndLoss],
+        quarterly_pls: dict[tuple[int, int], ProfitAndLoss],
         kpis: FinancialKPIs,
         recon_results: list[ReconciliationResult],
         all_reconciled: bool,
@@ -2563,6 +2604,9 @@ class ReportBuilder:
         mask_personal: bool = False,
         full_detail: bool = False,
         projection_status: str = "not_requested",
+        period_start_date: date | None = None,
+        period_end_date: date | None = None,
+        mode: str = "combined",
     ):
         self.statements = statements
         self.config = config
@@ -2578,6 +2622,9 @@ class ReportBuilder:
         self.mask_personal = mask_personal
         self.full_detail = full_detail
         self.projection_status = projection_status
+        self.period_start_date = period_start_date
+        self.period_end_date = period_end_date
+        self.mode = mode
 
     def build(self) -> ReportPDF:
         report_title = f"Business Financial Report - {self.config.display_name()}"
@@ -2587,19 +2634,30 @@ class ReportBuilder:
         self._executive_summary(pdf)
         self._data_quality(pdf)
         self._monthly_balance_summary(pdf)
-        self._revenue_expense_overview(pdf)
+
+        if self.mode in ("combined", "yearly"):
+            self._revenue_expense_overview(pdf)
+
         self._pnl_statement(pdf)
-        self._monthly_pnl(pdf)
-        self._individual_monthly_pnl(pdf)
-        self._quarterly_pnl(pdf)
-        self._revenue_analysis(pdf)
-        self._expense_analysis(pdf)
-        self._top_customers(pdf)
-        self._top_vendors(pdf)
-        self._cash_flow_analysis(pdf)
-        self._balance_trend(pdf)
-        self._expense_trends(pdf)
-        self._financial_ratios(pdf)
+
+        if self.mode in ("combined",):
+            self._monthly_pnl(pdf)
+        else:
+            self._individual_monthly_pnl(pdf)
+
+        if self.mode in ("combined", "quarterly"):
+            self._quarterly_pnl(pdf)
+
+        if self.mode in ("combined", "yearly"):
+            self._revenue_analysis(pdf)
+            self._expense_analysis(pdf)
+            self._top_customers(pdf)
+            self._top_vendors(pdf)
+            self._cash_flow_analysis(pdf)
+            self._balance_trend(pdf)
+            self._expense_trends(pdf)
+            self._financial_ratios(pdf)
+
         if self.projections:
             self._projections(pdf)
             self._projection_assumptions(pdf)
@@ -2615,9 +2673,13 @@ class ReportBuilder:
                 "Re-run after categorizing more transactions to enable projections."
             )
         elif self.projection_status == "not_requested":
-            pass  # no projections requested, nothing to show
-        self._transaction_detail(pdf)
-        self._cpa_package(pdf)
+            pass
+
+        if self.mode in ("combined", "yearly"):
+            self._transaction_detail(pdf)
+            self._cpa_package(pdf)
+        elif self.mode in ("cpa",):
+            self._cpa_package(pdf)
         return pdf
 
     def _mask_text(self, text: str) -> str:
@@ -2654,7 +2716,15 @@ class ReportBuilder:
 
         pdf.set_font("DJV", "", 10)
         pdf.set_text_color(100, 100, 100)
-        if len(self.statements) > 0:
+        if self.period_start_date or self.period_end_date:
+            if self.period_start_date and self.period_end_date:
+                dr = f"{self.period_start_date.strftime('%B %d, %Y')}  to  {self.period_end_date.strftime('%B %d, %Y')}"
+            elif self.period_start_date:
+                dr = f"{self.period_start_date.strftime('%B %d, %Y')}  to  {self.statements[-1].month_label}"
+            else:
+                dr = f"{self.statements[0].month_label}  to  {self.period_end_date.strftime('%B %d, %Y')}"
+            pdf.cell(0, 7, dr, align="C", new_x="LMARGIN", new_y="NEXT")
+        elif len(self.statements) > 0:
             dr = f"{self.statements[0].month_label}  to  {self.statements[-1].month_label}"
             pdf.cell(0, 7, dr, align="C", new_x="LMARGIN", new_y="NEXT")
         if self.config.address:
@@ -2719,8 +2789,17 @@ class ReportBuilder:
     def _executive_summary(self, pdf: ReportPDF):
         pdf.add_page()
         pdf.section_title("Executive Financial Summary")
+        if self.period_start_date or self.period_end_date:
+            if self.period_start_date and self.period_end_date:
+                period_label = f"{self.period_start_date.strftime('%B %d, %Y')} - {self.period_end_date.strftime('%B %d, %Y')}"
+            elif self.period_start_date:
+                period_label = f"{self.period_start_date.strftime('%B %d, %Y')} - {self.statements[-1].month_label}"
+            else:
+                period_label = f"{self.statements[0].month_label} - {self.period_end_date.strftime('%B %d, %Y')}"
+        else:
+            period_label = f"{self.statements[0].month_label} - {self.statements[-1].month_label}"
         pdf.body_text(
-            f"Reporting Period: {self.statements[0].month_label} - {self.statements[-1].month_label}",
+            f"Reporting Period: {period_label}",
             size=8,
         )
 
@@ -3168,18 +3247,22 @@ class ReportBuilder:
         pdf.section_title("Quarterly Profit and Loss Statements")
         pdf.body_text_small(_PNL_DISCLAIMER)
 
-        headers = ["Metric", "Q1", "Q2", "Q3", "Q4", "Total"]
         q_keys = sorted(self.quarterly_pls.keys())
+        q_labels = [f"FY{fy} Q{q}" for fy, q in q_keys]
+        headers = ["Metric"] + q_labels + ["Total"]
 
         def q_val(fn) -> list[str]:
             vals = []
             total = Decimal("0")
-            for q in range(1, 5):
-                v = fn(self.quarterly_pls.get(q, ProfitAndLoss()))
+            for key in q_keys:
+                v = fn(self.quarterly_pls.get(key, ProfitAndLoss()))
                 vals.append(fmt_dollar(v))
                 total += v
             return vals + [fmt_dollar(total)]
 
+        q_width = max(26, int(120 / max(len(q_keys), 1)))
+        total_width = 30
+        cw_q = [45] + [q_width] * len(q_keys) + [total_width]
         rows = [
             ["Revenue"] + q_val(lambda p: p.total_revenue),
             ["Direct Costs"] + q_val(lambda p: p.total_direct_costs),
@@ -3188,9 +3271,8 @@ class ReportBuilder:
             ["Operating Profit"] + q_val(lambda p: p.operating_profit),
             ["Net Profit"] + q_val(lambda p: p.net_profit),
         ]
-        cw_q = [45, 30, 30, 30, 30, 30]
         pdf.draw_table(headers, rows, col_widths=cw_q,
-                       col_aligns=["L"] + ["R"] * 5,
+                       col_aligns=["L"] + ["R"] * (len(q_keys) + 1),
                        section_label="Quarterly P&L")
 
     def _revenue_analysis(self, pdf: ReportPDF):
@@ -3336,8 +3418,8 @@ class ReportBuilder:
             ("Avg Monthly Expenses", fmt_dollar(kpi.avg_monthly_expenses)),
             ("Avg Monthly Net Profit", fmt_dollar(kpi.avg_monthly_net)),
             ("Average Transaction Value", fmt_dollar(kpi.avg_transaction_value)),
-            ("Largest Income Transaction", fmt_dollar(kpi.largest_income)),
-            ("Largest Expense Transaction", fmt_dollar(kpi.largest_expense)),
+            ("Largest Bank Credit", fmt_dollar(kpi.largest_income)),
+            ("Largest Bank Debit", fmt_dollar(kpi.largest_expense)),
             ("Min Monthly Balance", fmt_dollar(kpi.min_monthly_balance)),
             ("Max Monthly Balance", fmt_dollar(kpi.max_monthly_balance)),
             ("Cash Runway Estimate (months)", kpi.cash_runway_months),
@@ -3580,7 +3662,13 @@ class ReportBuilder:
             ("Interest Expense", fmt_dollar(pl.total_other_expense)),
             ("Net Cash-Basis Profit (Loss)", fmt_dollar(pl.net_profit)),
             ("", ""),
-            ("Estimated Tax Reserve (25%)", fmt_dollar(pl.net_profit * Decimal("0.25") if pl.net_profit > 0 else Decimal("0"))),
+            ("Estimated Tax Reserve ({:.0f}%)".format(
+                float(self.config.projection_config.get("tax_reserve_pct", 0.25)) * 100
+                if self.config.projection_config else 25),
+             fmt_dollar(pl.net_profit * Decimal(str(
+                 self.config.projection_config.get("tax_reserve_pct", 0.25)
+                 if self.config.projection_config else 0.25
+             )) if pl.net_profit > 0 else Decimal("0"))),
             ("", ""),
             ("Non-Income/Expense Items:", ""),
             ("Owner Contributions", fmt_dollar(pl.owner_contributions)),
@@ -3755,24 +3843,7 @@ class ReportBuilder:
     def _cpa_fixed_assets(self, pdf: ReportPDF):
         pdf.add_page()
         pdf.section_title("Page 6: Fixed Assets and Large Purchases")
-        excluded_cats = {
-            "Payroll", "Payroll Taxes", "Bank and Merchant Fees",
-            "Business Insurance", "Rent or Lease",
-            "Software and Cloud Services", "Telephone and Internet",
-            "Account Transfer", "Credit Card Payment", "Loan Proceeds",
-            "Loan Principal Payment", "Owner Contribution",
-            "Owner Draw or Distribution",
-        }
-        large_purchases = [
-            tx for s in self.statements for tx in s.transactions
-            if not tx.is_credit
-            and tx.amount >= Decimal("500")
-            and not tx.is_transfer
-            and not tx.is_loan
-            and not tx.is_owner_related
-            and tx.business_category not in excluded_cats
-            and "RETURNED ITEM" not in tx.description.upper()
-        ]
+        large_purchases = get_fixed_asset_candidates(self.statements)
         large_purchases.sort(key=lambda tx: tx.amount, reverse=True)
 
         pdf.body_text_small(
@@ -4096,8 +4167,7 @@ class ReportBuilder:
         if uncat_loans > 0:
             questions.append(f"Verify the {uncat_loans} transactions flagged as loan-related requiring confirmation.")
 
-        large_purchases = sum(1 for s in self.statements for tx in s.transactions
-                              if not tx.is_credit and tx.amount >= Decimal("500") and not tx.is_transfer)
+        large_purchases = len(get_fixed_asset_candidates(self.statements))
         if large_purchases > 0:
             questions.append(f"Which of the {large_purchases} purchases over $500 were fixed assets?")
 
@@ -4254,15 +4324,48 @@ class ReportBuilder:
 # =============================================================================
 
 
+_FIXED_ASSET_EXCLUDED_CATS: set[str] = {
+    "Payroll", "Payroll Taxes", "Bank and Merchant Fees",
+    "Business Insurance", "Rent or Lease",
+    "Software and Cloud Services", "Telephone and Internet",
+    "Account Transfer", "Credit Card Payment", "Loan Proceeds",
+    "Loan Principal Payment", "Owner Contribution",
+    "Owner Draw or Distribution",
+}
+
+
+def get_fixed_asset_candidates(
+    statements: list[Statement],
+    min_amount: Decimal = Decimal("500"),
+) -> list[Transaction]:
+    """Return transactions that are fixed-asset candidates.
+
+    Excludes payroll, insurance, loan payments, transfers, and returned items.
+    This is the single source of truth used by both the PDF and CSV exporters.
+    """
+    return [
+        tx for s in statements for tx in s.transactions
+        if not tx.is_credit
+        and tx.amount >= min_amount
+        and not tx.is_transfer
+        and not tx.is_loan
+        and not tx.is_owner_related
+        and tx.business_category not in _FIXED_ASSET_EXCLUDED_CATS
+        and "RETURNED ITEM" not in tx.description.upper()
+    ]
+
+
 class CSVExporter:
     """Exports financial data to CSV files."""
 
     def __init__(self, statements: list[Statement], config: BusinessConfig,
-                 pl: ProfitAndLoss, projections: list[ProjectionResult] | None = None):
+                 pl: ProfitAndLoss, projections: list[ProjectionResult] | None = None,
+                 recon_results: list[ReconciliationResult] | None = None):
         self.statements = statements
         self.config = config
         self.pl = pl
         self.projections = projections or []
+        self.recon_results = recon_results or []
 
     def export_audit(self, path: Path, mask_personal: bool = False):
         """Export full transaction audit CSV."""
@@ -4342,12 +4445,11 @@ class CSVExporter:
                          for s in self.statements for tx in s.transactions
                          if not tx.is_credit and tx.include_in_pnl])
 
-        # Fixed asset candidates
+        # Fixed asset candidates (uses shared logic with PDF)
         self._write_csv(output_dir / "cpa_fixed_assets.csv",
                         ["Date", "Vendor", "Description", "Amount"],
                         [[tx.post_date, normalize_merchant(tx.description), tx.description, str(tx.amount)]
-                         for s in self.statements for tx in s.transactions
-                         if not tx.is_credit and tx.amount >= Decimal("500")])
+                         for tx in get_fixed_asset_candidates(self.statements)])
 
         # Loan activity
         self._write_csv(output_dir / "cpa_loan_activity.csv",
@@ -4374,10 +4476,39 @@ class CSVExporter:
                          if tx.cpa_review])
 
         # Reconciliation
+        recon_headers = [
+            "Statement", "Status", "CreditsParsed", "CreditsExpected",
+            "DebitsParsed", "DebitsExpected", "CreditTotalParsed",
+            "CreditTotalExpected", "DebitTotalParsed", "DebitTotalExpected",
+            "BeginningBalance", "EndingBalance", "CalculatedEnding",
+            "BalanceOK", "Warnings",
+        ]
+        recon_rows_csv: list[list[str]] = []
+        if self.recon_results:
+            for rr in self.recon_results:
+                status = "PASS" if rr.passed else ("FORCED" if rr.forced else "FAIL")
+                recon_rows_csv.append([
+                    rr.statement_label,
+                    status,
+                    str(rr.parsed_credit_count),
+                    str(rr.expected_credit_count),
+                    str(rr.parsed_debit_count),
+                    str(rr.expected_debit_count),
+                    str(rr.parsed_credit_total),
+                    str(rr.expected_credit_total),
+                    str(rr.parsed_debit_total),
+                    str(rr.expected_debit_total),
+                    str(rr.beginning_balance),
+                    str(rr.ending_balance),
+                    str(rr.calculated_ending),
+                    "Yes" if rr.balance_ok else "No",
+                    "; ".join(rr.warnings),
+                ])
+        else:
+            recon_rows_csv = [[f"{s.month_label}", "N/A"] + [""] * (len(recon_headers) - 2)
+                              for s in self.statements]
         self._write_csv(output_dir / "cpa_reconciliation.csv",
-                        ["Statement", "Status", "Warnings"],
-                        [[f"{s.month_label}", "N/A", ""]
-                         for s in self.statements])
+                        recon_headers, recon_rows_csv)
 
         logger.info("CPA CSV files saved to: %s", output_dir)
 
@@ -4568,8 +4699,10 @@ def build_report(
     if target_month:
         statements = [s for s in statements if s.month == target_month]
     if target_quarter:
-        q_months = _QUARTER_MONTHS.get(target_quarter, [])
-        statements = [s for s in statements if s.month in q_months]
+        # Fiscal-year-aware quarter filtering
+        fys = config.fiscal_year_start
+        fy_quarter_months = _fiscal_quarter_months(target_quarter, fys)
+        statements = [s for s in statements if s.month in fy_quarter_months]
 
     if not statements:
         logger.error("No statements found matching filters.")
@@ -4595,21 +4728,52 @@ def build_report(
                 and (ed is None or tx.date_obj <= ed)
             ]
             if filtered_tx:
-                # Clone the statement with only the matching transactions
+                period_credits = sum(
+                    (tx.amount for tx in filtered_tx if tx.is_credit),
+                    Decimal("0"),
+                )
+                period_debits = sum(
+                    (tx.amount for tx in filtered_tx if not tx.is_credit),
+                    Decimal("0"),
+                )
+                period_credit_count = sum(1 for tx in filtered_tx if tx.is_credit)
+                period_debit_count = sum(1 for tx in filtered_tx if not tx.is_credit)
+                # Normalize chronologically in case source has newest-first ordering
+                sorted_tx = sorted(
+                    filtered_tx,
+                    key=lambda tx: (tx.date_obj, tx.sequence),
+                )
+                first_tx = sorted_tx[0]
+                last_tx = sorted_tx[-1]
+                period_start_balance = first_tx.balance - first_tx.signed_amount
+                period_end_balance = last_tx.balance
+                # Filter daily balances to the period range
+                period_daily: list[dict] = [
+                    db for db in stmt.daily_balances
+                    if (sd is None or _parse_daily_date(db.get("date", "")) >= sd)
+                    and (ed is None or _parse_daily_date(db.get("date", "")) <= ed)
+                ]
                 filtered_stmts.append(Statement(
                     statement_date=stmt.statement_date,
                     account_number=stmt.account_number,
-                    beginning_balance=stmt.beginning_balance,
-                    ending_balance=stmt.ending_balance,
-                    total_credits=stmt.total_credits,
-                    total_debits=stmt.total_debits,
-                    credit_count=stmt.credit_count,
-                    debit_count=stmt.debit_count,
-                    transactions=filtered_tx,
+                    beginning_balance=period_start_balance,
+                    ending_balance=period_end_balance,
+                    total_credits=period_credits,
+                    total_debits=period_debits,
+                    credit_count=period_credit_count,
+                    debit_count=period_debit_count,
+                    transactions=sorted_tx,
                     checks_cleared=stmt.checks_cleared,
-                    daily_balances=stmt.daily_balances,
+                    daily_balances=period_daily,
                     file_path=stmt.file_path,
                 ))
+        if not filtered_stmts:
+            logger.error(
+                "No transactions found between %s and %s.",
+                start_date_str or "the beginning",
+                end_date_str or "the end",
+            )
+            sys.exit(1)
         report_statements = filtered_stmts
 
     # Reconcile against the FULL statements (not the date-filtered subset)
@@ -4649,7 +4813,7 @@ def build_report(
         label=f"Cash-Basis P&L - {config.display_name()}",
     )
     monthly_pls = build_monthly_pls(report_statements)
-    quarterly_pls = build_quarterly_pls(report_statements)
+    quarterly_pls = build_quarterly_pls(report_statements, config.fiscal_year_start)
     kpis = calculate_kpis(pl, len(report_statements), report_statements)
 
     # Projections
@@ -4658,10 +4822,10 @@ def build_report(
     if do_projections:
         projection_status = "requested"
         cpa_review_count = sum(
-            1 for s in statements for tx in s.transactions if tx.cpa_review
+            1 for s in report_statements for tx in s.transactions if tx.cpa_review
         )
         total_rev = sum((monthly_pls[k].total_revenue for k in sorted(monthly_pls.keys())), Decimal("0"))
-        if total_rev == 0 or cpa_review_count > len(statements) * 5:
+        if total_rev == 0 or cpa_review_count > len(report_statements) * 5:
             projection_status = "withheld"
             logger.info(
                 "Projections withheld: $%.2f classified revenue, %d transactions unclassified.",
@@ -4675,10 +4839,10 @@ def build_report(
                 monthly_pls[k].total_operating_expenses
                 for k in sorted(monthly_pls.keys())
             ]
-            starting_cash = statements[-1].ending_balance if statements else Decimal("0")
+            starting_cash = report_statements[-1].ending_balance if report_statements else Decimal("0")
 
             # Derive projection start from the last reported statement
-            last_stmt = statements[-1] if statements else None
+            last_stmt = report_statements[-1] if report_statements else None
             if last_stmt:
                 last_dt = last_stmt.date_obj
                 proj_start = date(last_dt.year, last_dt.month, 1) + timedelta(days=32)
@@ -4698,7 +4862,7 @@ def build_report(
 
     if strict:
         review_count = sum(
-            1 for s in statements for tx in s.transactions
+            1 for s in report_statements for tx in s.transactions
             if tx.cpa_review
         )
         if review_count and not allow_review_items:
@@ -4709,8 +4873,11 @@ def build_report(
             )
             sys.exit(1)
 
-    # Build report
     # Build report using the filtered transaction set
+    period_start_date = (datetime.strptime(start_date_str, "%Y-%m-%d").date()
+                         if start_date_str else None)
+    period_end_date = (datetime.strptime(end_date_str, "%Y-%m-%d").date()
+                       if end_date_str else None)
     builder = ReportBuilder(
         statements=report_statements,
         config=config,
@@ -4726,21 +4893,13 @@ def build_report(
         mask_personal=mask_personal,
         full_detail=full_detail,
         projection_status=projection_status,
+        period_start_date=period_start_date,
+        period_end_date=period_end_date,
+        mode=mode,
     )
 
     if mode == "cpa":
-        # CPA-only mode: just the CPA package
         pdf = ReportPDF(f"CPA Package - {config.display_name()}")
-        builder.statements = statements
-        builder.pl = pl
-        builder.monthly_pls = monthly_pls
-        builder.quarterly_pls = quarterly_pls
-        builder.kpis = kpis
-        builder.recon_results = recon_results
-        builder.all_reconciled = all_reconciled
-        builder.forced_generation = forced_generation
-        builder.projections = projections
-        builder.mask_personal = mask_personal
         builder._cpa_package(pdf)
         pdf.output(str(output_path))
     else:
@@ -4750,7 +4909,8 @@ def build_report(
     logger.info("Report saved to: %s", output_path)
 
     # Exports
-    exporter = CSVExporter(statements, config, pl, projections)
+    exporter = CSVExporter(report_statements, config, pl, projections,
+                           recon_results=recon_results)
     if audit_path:
         exporter.export_audit(audit_path, mask_personal)
     if pl_csv_path:
@@ -4940,7 +5100,7 @@ Examples:
     elif args.month:
         mode = "monthly"
     elif args.year and not args.month and not args.quarter:
-        mode = "yearly"
+        mode = "combined"
     else:
         mode = "combined"
 
@@ -4965,6 +5125,24 @@ Examples:
         if len(matching_years) > 1:
             logger.info(
                 "Note: --month without --year, using latest year %s "
+                "(found: %s). Use --year to override.",
+                target_year, matching_years,
+            )
+
+    # Auto-detect year for --quarter without --year (fiscal-year-aware)
+    if args.quarter and not target_year:
+        fy_start = config.fiscal_year_start
+        q_months = _fiscal_quarter_months(args.quarter, fy_start)
+        matching_years = sorted({
+            s.year for s in statements if s.month in q_months
+        })
+        if not matching_years:
+            logger.error("No statements found for quarter %s.", args.quarter)
+            sys.exit(1)
+        target_year = matching_years[-1]
+        if len(matching_years) > 1:
+            logger.info(
+                "Note: --quarter without --year, using latest year %s "
                 "(found: %s). Use --year to override.",
                 target_year, matching_years,
             )
@@ -5252,6 +5430,95 @@ def run_self_tests():
     check("12 monthly periods", len(periods) == 12)
     check("first period January", periods[0].label == "January 2023")
     check("last period December", periods[-1].label == "December 2023")
+
+    # 21. Quarterly P&L with fiscal year awareness
+    stmts_q = [
+        Statement("01/31/2023", "X", Decimal("0"), Decimal("0"),
+                  Decimal("0"), Decimal("0"), 0, 0, transactions=[
+                      Transaction("01/15/2023", "REV", "REV", Decimal("1000.00"), True, Decimal("0"),
+                                  business_category="Service Revenue", include_in_pnl=True),
+                  ]),
+        Statement("04/30/2023", "X", Decimal("0"), Decimal("0"),
+                  Decimal("0"), Decimal("0"), 0, 0, transactions=[
+                      Transaction("04/15/2023", "EXP", "EXP", Decimal("500.00"), False, Decimal("0"),
+                                  business_category="Fuel", include_in_pnl=True),
+                  ]),
+    ]
+    qpl = build_quarterly_pls(stmts_q, fiscal_year_start=1)
+    check("quarterly P&L has (2023, 1) key", (2023, 1) in qpl)
+    check("quarterly P&L has (2023, 2) key", (2023, 2) in qpl)
+    check("Q1 revenue correct", qpl[(2023, 1)].total_revenue == Decimal("1000.00"))
+    check("Q2 expenses correct", qpl[(2023, 2)].total_direct_costs == Decimal("500.00"))
+
+    # 22. Fiscal year with non-January start
+    qpl_fiscal = build_quarterly_pls(stmts_q, fiscal_year_start=7)
+    check("fiscal year Q3 for July start (Jan in FY-1 Q3)", (2022, 3) in qpl_fiscal)
+
+    # 23. Fixed-asset candidate filtering
+    tx_asset_candidate = Transaction("01/15/2023", "EQUIPMENT PURCHASE", "EQUIPMENT PURCHASE",
+                                     Decimal("5000.00"), False, Decimal("0"),
+                                     business_category="Fixed Asset Purchase")
+    tx_payroll = Transaction("01/16/2023", "PAYROLL", "PAYROLL",
+                             Decimal("2000.00"), False, Decimal("0"),
+                             business_category="Payroll")
+    stmt_fa = Statement("01/31/2023", "X", Decimal("0"), Decimal("0"),
+                        Decimal("0"), Decimal("0"), 0, 0,
+                        transactions=[tx_asset_candidate, tx_payroll])
+    candidates = get_fixed_asset_candidates([stmt_fa])
+    check("fixed asset candidate included", len(candidates) == 1)
+    check("payroll excluded from FA candidates", candidates[0].business_category == "Fixed Asset Purchase")
+
+    # 24. Reconciliation CSV export
+    recon_res = ReconciliationResult(
+        statement_label="January 2023",
+        passed=True,
+        parsed_credit_count=1, expected_credit_count=1,
+        parsed_debit_count=1, expected_debit_count=1,
+        parsed_credit_total=Decimal("100.00"), expected_credit_total=Decimal("100.00"),
+        parsed_debit_total=Decimal("50.00"), expected_debit_total=Decimal("50.00"),
+        beginning_balance=Decimal("0"), ending_balance=Decimal("50.00"),
+        calculated_ending=Decimal("50.00"), balance_ok=True,
+        warnings=[],
+    )
+    exporter3 = CSVExporter([], BusinessConfig(), ProfitAndLoss(),
+                            recon_results=[recon_res])
+    recon_tmp = Path("/tmp/test_recon.csv")
+    exporter3.export_cpa(Path("/tmp/test_cpa_recon"))
+    recon_file = Path("/tmp/test_cpa_recon/cpa_reconciliation.csv")
+    check("recon CSV created", recon_file.exists())
+    if recon_file.exists():
+        content = recon_file.read_text()
+        check("recon CSV has PASS status", "PASS" in content)
+        check("recon CSV has parsed counts", "1" in content)
+        import shutil
+        shutil.rmtree(Path("/tmp/test_cpa_recon"), ignore_errors=True)
+
+    # 25. Fiscal quarter months helper
+    cal_q1 = _fiscal_quarter_months(1, 1)
+    check("calendar Q1 months", cal_q1 == [1, 2, 3])
+    cal_q4 = _fiscal_quarter_months(4, 1)
+    check("calendar Q4 months", cal_q4 == [10, 11, 12])
+    fy_jul_q1 = _fiscal_quarter_months(1, 7)
+    check("fiscal Q1 with July start", fy_jul_q1 == [7, 8, 9])
+    fy_jul_q4 = _fiscal_quarter_months(4, 7)
+    check("fiscal Q4 with July start", fy_jul_q4 == [4, 5, 6])
+
+    # 26. Chronological transaction ordering for date-range balances
+    # Simulate newest-first statement ordering
+    tx_jan_20 = Transaction("01/20/2023", "DEBIT", "DEBIT", Decimal("20.00"),
+                            False, Decimal("80.00"), sequence=2)
+    tx_jan_10 = Transaction("01/10/2023", "CREDIT", "CREDIT", Decimal("100.00"),
+                            True, Decimal("100.00"), sequence=1)
+    sorted_tx = sorted([tx_jan_20, tx_jan_10],
+                       key=lambda tx: (tx.date_obj, tx.sequence))
+    check("sorted oldest-first", sorted_tx[0].sequence == 1)
+    check("sorted newest-last", sorted_tx[1].sequence == 2)
+    first = sorted_tx[0]
+    last = sorted_tx[-1]
+    start_bal = first.balance - first.signed_amount
+    end_bal = last.balance
+    check("chrono start balance correct", start_bal == Decimal("0"))
+    check("chrono end balance correct", end_bal == Decimal("80.00"))
 
     # Summary
     total = passed + failed

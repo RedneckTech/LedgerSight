@@ -425,8 +425,8 @@ class TestProfitAndLossByPeriod(unittest.TestCase):
                       ]),
         ]
         qpls = bfr.build_quarterly_pls(stmts)
-        self.assertEqual(qpls[1].total_revenue, Decimal("1000.00"))
-        self.assertEqual(qpls[2].total_revenue, Decimal("500.00"))
+        self.assertEqual(qpls[(2023, 1)].total_revenue, Decimal("1000.00"))
+        self.assertEqual(qpls[(2023, 2)].total_revenue, Decimal("500.00"))
 
 
 class TestReconciliation(unittest.TestCase):
@@ -822,7 +822,7 @@ class TestFindPdfs(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "test.pdf").touch()
             (Path(d) / "test.txt").touch()
-            (Path(d) / "bank_report_2023.pdf").touch()  # should be excluded
+            (Path(d) / "personal_financial_report_2023.pdf").touch()  # should be excluded
             pdfs = bfr.find_pdfs(Path(d))
             self.assertEqual(len(pdfs), 1)
             self.assertIn("test.pdf", [p.name for p in pdfs])

@@ -5,11 +5,11 @@ Parses First Interstate Bank checking account PDF statements and produces
 a comprehensive PDF report with charts, tables, and categorized spending.
 
 Usage:
-    python3 bank_report.py                          # combined yearly + monthly
-    python3 bank_report.py --year 2026              # yearly overview only
-    python3 bank_report.py --month 5                # single month (May of inferred year)
-    python3 bank_report.py --month 5 --year 2026    # explicit month/year
-    python3 bank_report.py -o custom_report.pdf     # custom output path
+    python3 personal_financial_report.py                          # combined yearly + monthly
+    python3 personal_financial_report.py --year 2026              # yearly overview only
+    python3 personal_financial_report.py --month 5                # single month (May of inferred year)
+    python3 personal_financial_report.py --month 5 --year 2026    # explicit month/year
+    python3 personal_financial_report.py -o custom_report.pdf     # custom output path
 """
 
 import argparse
@@ -900,7 +900,7 @@ class ReportPDF(FPDF):
         self.set_text_color(150, 150, 150)
         self.cell(
             0, 8,
-            f"Generated {self.generated_at}  |  bank_report.py  |  {_SCRIPT_HASH}",
+            f"Generated {self.generated_at}  |  personal_financial_report.py  |  {_SCRIPT_HASH}",
             align="C",
         )
 
@@ -1528,7 +1528,7 @@ def main():
     )
     parser.add_argument(
         "-o", "--output", type=str, default=None,
-        help="Output PDF path (default: bank_report_<year>.pdf or bank_report_<month>_<year>.pdf)",
+        help="Output PDF path (default: personal_financial_report_<year>.pdf or personal_financial_report_<month>_<year>.pdf)",
     )
     parser.add_argument(
         "-d", "--directory", type=str, default=SCRIPT_DIR,
@@ -1607,11 +1607,11 @@ def main():
         output = args.output
     elif args.month:
         yr = args.year or statements[0].year
-        output = os.path.join(args.directory, f"bank_report_{args.month:02d}_{yr}.pdf")
+        output = os.path.join(args.directory, f"personal_financial_report_{args.month:02d}_{yr}.pdf")
     elif args.year:
-        output = os.path.join(args.directory, f"bank_report_{args.year}.pdf")
+        output = os.path.join(args.directory, f"personal_financial_report_{args.year}.pdf")
     else:
-        output = os.path.join(args.directory, "bank_report.pdf")
+        output = os.path.join(args.directory, "personal_financial_report.pdf")
 
     # Determine audit path
     audit_path = None
