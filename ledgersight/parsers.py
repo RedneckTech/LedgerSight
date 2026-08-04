@@ -5,6 +5,7 @@ import hashlib
 import logging
 import re
 import subprocess
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -487,29 +488,41 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
     )
 
 
-def validate_statement(stmt: Statement) -> list[str]:
-    """Validate that a parsed statement has required metadata. Returns warnings."""
-    warnings = []
-    if not stmt.statement_date:
-        warnings.append("Missing statement date")
-    elif stmt.statement_date.strip():
+@dataclass
+class StatementValidation:
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+def validate_statement(stmt: Statement) -> StatementValidation:
+    """Validate a parsed statement. Returns errors (fatal) and warnings."""
+    result = StatementValidation()
+
+    if not stmt.statement_date or not stmt.statement_date.strip():
+        result.errors.append("Missing statement date")
+    else:
         try:
             parts = stmt.statement_date.split("/")
             if len(parts) != 3:
-                warnings.append(f"Unparseable statement date: {stmt.statement_date}")
+                result.errors.append(f"Unparseable statement date: {stmt.statement_date}")
+            else:
+                stmt.date_obj
         except (ValueError, IndexError):
-            warnings.append(f"Unparseable statement date: {stmt.statement_date}")
+            result.errors.append(f"Invalid statement date: {stmt.statement_date}")
+
     if not stmt.account_number:
-        warnings.append("Missing account number")
+        result.errors.append("Missing account number")
+
     if stmt.beginning_balance == 0 and stmt.ending_balance == 0 and stmt.transactions:
-        warnings.append("Summary balances not found (beginning/ending)")
+        result.warnings.append("Summary balances not found (beginning/ending)")
     if stmt.credit_count == 0 and stmt.debit_count == 0 and stmt.transactions:
-        warnings.append("Credit/debit counts not found in summary")
-    # Validate transaction dates are plausible
-    for tx in stmt.transactions[:3]:
+        result.warnings.append("Credit/debit counts not found in summary")
+
+    for tx in stmt.transactions:
         try:
             tx.date_obj
         except (ValueError, IndexError):
-            warnings.append(f"Invalid transaction date: {tx.post_date}")
+            result.errors.append(f"Invalid transaction date: {tx.post_date}")
             break
-    return warnings
+
+    return result

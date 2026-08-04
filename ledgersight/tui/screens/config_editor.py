@@ -131,6 +131,13 @@ class ConfigEditorScreen(Screen[None]):
             from ledgersight.models import BusinessConfig
 
             config = app.state.config or BusinessConfig()
+
+            try:
+                tax_year = int(self.query_one("#tax_year", Input).value or config.tax_year)
+            except (ValueError, TypeError):
+                self.notify("Tax year must be a number", severity="error")
+                return
+
             config = replace(
                 config,
                 business_name=self.query_one("#business_name", Input).value,
@@ -140,7 +147,7 @@ class ConfigEditorScreen(Screen[None]):
                 email=self.query_one("#email", Input).value,
                 industry=self.query_one("#industry", Input).value,
                 entity_type=self.query_one("#entity_type", Select).value or config.entity_type,
-                tax_year=int(self.query_one("#tax_year", Input).value or config.tax_year),
+                tax_year=tax_year,
                 fiscal_year_start=int(
                     self.query_one("#fiscal_year_start", Select).value
                     or config.fiscal_year_start
@@ -156,8 +163,14 @@ class ConfigEditorScreen(Screen[None]):
                 self.notify(f"Config error: {errors[0]}", severity="error")
                 return
 
+            from ledgersight.tui.screens.welcome import _save_recent
+
             app.state.config = config
-            app.state.config_path = Path(_DEFAULT_CONFIG)
+            if app.state.config_path:
+                app.state.config_path = app.state.config_path
+            else:
+                app.state.config_path = Path(_DEFAULT_CONFIG)
+            _save_recent(app.state.config_path)
             await app.goto_screen("statements")
 
     @on(Button.Pressed, "#btn-back")

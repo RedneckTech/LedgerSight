@@ -6,6 +6,7 @@ import logging
 import shutil
 import tempfile
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -48,6 +49,16 @@ from ledgersight.redaction import DataRedactor
 logger = logging.getLogger("ledgersight.business.report")
 
 _SCRIPT_HASH = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:8]
+
+
+@dataclass
+class ReportBuildResult:
+    output_path: Path
+    pl: ProfitAndLoss
+    monthly_pls: dict[str, ProfitAndLoss]
+    quarterly_pls: dict[tuple[int, int], ProfitAndLoss]
+    projections: list[ProjectionResult] | None
+    recon_results: list[ReconciliationResult]
 
 
 # =============================================================================
@@ -99,7 +110,12 @@ class ReportBuilder:
         self.redactor = redactor or DataRedactor(mask_personal=False)
 
     def build(self) -> ReportPDF:
-        report_title = f"Business Financial Report - {self.config.display_name()}"
+        safe_name = (
+            self.redactor.person(self.config.display_name())
+            if self.redactor.mask_personal
+            else self.config.display_name()
+        )
+        report_title = f"Business Financial Report - {safe_name}"
         pdf = ReportPDF(report_title)
 
         self._cover_page(pdf)
@@ -1947,7 +1963,7 @@ def build_report(
     do_projections: bool = False,
     allow_review_items: bool = False,
     overwrite: bool = False,
-) -> None:
+) -> ReportBuildResult:
     """Orchestrate the full report build process."""
 
     if target_quarter:
@@ -2217,13 +2233,17 @@ def build_report(
         redactor=redactor,
     )
 
+    if cpa_export_dir:
+        cpa_export_dir.mkdir(parents=True, exist_ok=True)
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
 
         tmp_output = tmpdir_path / output_path.name
 
         if mode == "cpa":
-            pdf = ReportPDF(f"CPA Package - {config.display_name()}")
+            safe_name = redactor.person(config.display_name()) if redactor.mask_personal else config.display_name()
+            pdf = ReportPDF(f"CPA Package - {safe_name}")
             builder._cpa_package(pdf)
             pdf.output(str(tmp_output))
         else:
@@ -2250,19 +2270,46 @@ def build_report(
         if category_template_path:
             exporter.export_category_template(tmp_category)
 
-        shutil.move(str(tmp_output), str(output_path))
+        moves: list[tuple[Path, Path]] = []
+        moves.append((tmp_output, output_path))
         if audit_path:
-            shutil.move(str(tmp_audit), str(audit_path))
+            moves.append((tmp_audit, audit_path))
         if pl_csv_path:
-            shutil.move(str(tmp_pl_csv), str(pl_csv_path))
+            moves.append((tmp_pl_csv, pl_csv_path))
         if cpa_export_dir:
-            for f in tmp_cpa_dir.iterdir():
+            for f in sorted(tmp_cpa_dir.iterdir()):
                 dest = cpa_export_dir / f.name
                 if dest.exists():
                     dest.unlink()
-                shutil.move(str(f), str(dest))
-            tmp_cpa_dir.rmdir()
+                moves.append((f, dest))
         if category_template_path:
-            shutil.move(str(tmp_category), str(category_template_path))
+            moves.append((tmp_category, category_template_path))
+
+        completed: list[tuple[Path, Path]] = []
+        try:
+            for src, dst in moves:
+                shutil.move(str(src), str(dst))
+                completed.append((src, dst))
+        except Exception:
+            for rev_src, rev_dst in completed:
+                try:
+                    shutil.move(str(rev_dst), str(rev_src))
+                except Exception:
+                    logger.warning("Failed to roll back move: %s -> %s", rev_dst, rev_src)
+            raise
+
+        if tmp_cpa_dir:
+            try:
+                tmp_cpa_dir.rmdir()
+            except OSError:
+                pass
 
     logger.info("Report saved to: %s", output_path)
+    return ReportBuildResult(
+        output_path=output_path,
+        pl=pl,
+        monthly_pls=monthly_pls,
+        quarterly_pls=quarterly_pls,
+        projections=projections,
+        recon_results=recon_results,
+    )

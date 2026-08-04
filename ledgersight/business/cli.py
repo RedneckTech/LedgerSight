@@ -262,7 +262,7 @@ Examples:
         category_template_path = out_dir / f"{base}_category_template.csv"
 
     try:
-        build_report(
+        _ = build_report(
             statements=statements,
             config=config,
             output_path=output_path,

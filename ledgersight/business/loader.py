@@ -39,28 +39,28 @@ def load_statements(pdf_paths: list[Path]) -> StatementLoadResult:
 
     seen_hashes: set[str] = set()
     for pdf_path in pdf_paths:
-        fhash = file_hash(pdf_path)
-        if fhash in seen_hashes:
-            logger.warning("Skipping duplicate file: %s", pdf_path)
-            result.warnings.append(f"Skipping duplicate file: {pdf_path.name}")
-            continue
-        seen_hashes.add(fhash)
-
         try:
+            fhash = file_hash(pdf_path)
+            if fhash in seen_hashes:
+                logger.warning("Skipping duplicate file: %s", pdf_path)
+                result.warnings.append(f"Skipping duplicate file: {pdf_path.name}")
+                continue
+            seen_hashes.add(fhash)
+
             text = extract_text(pdf_path)
             stmt = parse_statement(text, str(pdf_path))
-            if stmt.transactions:
-                stmt_warnings = validate_statement(stmt)
-                if stmt_warnings:
-                    for w in stmt_warnings:
-                        logger.warning("%s: %s", pdf_path.name, w)
-                        result.warnings.append(f"{pdf_path.name}: {w}")
+            validation = validate_statement(stmt)
+            for w in validation.warnings:
+                logger.warning("%s: %s", pdf_path.name, w)
+            for e in validation.errors:
+                logger.error("%s: %s", pdf_path.name, e)
+
+            if validation.errors:
+                result.rejected.append(f"{pdf_path.name}: {'; '.join(validation.errors)}")
+            elif stmt.transactions:
                 result.statements.append(stmt)
             else:
-                msg = f"No transactions parsed from: {pdf_path}"
-                logger.warning(msg)
-                result.warnings.append(msg)
-                result.rejected.append(str(pdf_path))
+                logger.warning("No transactions parsed from: %s", pdf_path)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, UnicodeError, ValueError) as exc:
             msg = f"Failed to parse {pdf_path}: {exc}"
             logger.error(msg)
