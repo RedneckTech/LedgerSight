@@ -6,10 +6,9 @@ from pathlib import Path
 
 from textual import on
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Label, Static, Switch
-from textual.worker import Worker, WorkerState
+from textual.widgets import Button, DataTable, Label, Static
 
 from ledgersight.tui.app import LedgerSightApp
 
@@ -59,10 +58,10 @@ class StatementsScreen(Screen[None]):
         if not isinstance(app, LedgerSightApp):
             return
 
+        from ledgersight.categorizer import TransactionCategorizer
         from ledgersight.config import load_config
         from ledgersight.constants import _DEFAULT_CONFIG
         from ledgersight.parsers import check_pdftotext, extract_text, find_pdfs, parse_statement
-        from ledgersight.categorizer import TransactionCategorizer
         from ledgersight.reconciliation import reconcile_all
 
         try:
@@ -89,8 +88,8 @@ class StatementsScreen(Screen[None]):
         if config is None:
             config = load_config(Path(_DEFAULT_CONFIG))
 
-        import subprocess
         import logging
+        import subprocess
         logger = logging.getLogger("ledgersight.tui")
 
         statements = []

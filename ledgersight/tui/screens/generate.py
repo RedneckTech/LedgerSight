@@ -7,10 +7,9 @@ from pathlib import Path
 
 from textual import on
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal
 from textual.screen import Screen
 from textual.widgets import Button, Label, ProgressBar, RichLog, Static
-from textual.worker import Worker, WorkerState, get_current_worker
 
 from ledgersight.tui.app import LedgerSightApp
 
@@ -61,8 +60,6 @@ class GenerateScreen(Screen[None]):
 
         self.query_one("#btn-generate", Button).disabled = True
         self.query_one("#gen-status", Label).update("Generating report...")
-        progress = self.query_one("#gen-progress", ProgressBar)
-        log = self.query_one("#gen-log", RichLog)
 
         self.run_worker(self._do_generate(), exclusive=True)
 
@@ -138,7 +135,7 @@ class GenerateScreen(Screen[None]):
             )
 
             progress.update(progress=100)
-            log.write(f"")
+            log.write("")
             log.write(f"[bold green]Report saved to: {output_path}[/bold green]")
             status_label.update(f"Complete — {output_path}")
 

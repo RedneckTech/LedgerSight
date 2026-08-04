@@ -8,7 +8,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Button, Label, ListItem, ListView, Static
+from textual.widgets import Button, ListItem, ListView, Static
 
 from ledgersight.tui.app import LedgerSightApp
 
@@ -88,7 +88,7 @@ class WelcomeScreen(Screen[None]):
     async def _open_config(self) -> None:
         app = self.app
         if isinstance(app, LedgerSightApp):
-            from ledgersight.config import load_config, _DEFAULT_CONFIG
+            from ledgersight.config import _DEFAULT_CONFIG, load_config
 
             config = load_config(Path(_DEFAULT_CONFIG))
             app.state.config = config

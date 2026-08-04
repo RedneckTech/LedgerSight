@@ -1,13 +1,15 @@
 """Key Performance Indicators calculation."""
 from __future__ import annotations
+
 from dataclasses import dataclass
 from decimal import Decimal
 
-from ledgersight.models import Statement, Transaction
-from ledgersight.parsers import safe_pct
-
 # Import ProfitAndLoss — use TYPE_CHECKING for forward reference
 from typing import TYPE_CHECKING
+
+from ledgersight.models import Statement
+from ledgersight.parsers import safe_pct
+
 if TYPE_CHECKING:
     from ledgersight.business.pl import ProfitAndLoss
 

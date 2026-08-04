@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from textual import on
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Input, Label, Static
 
@@ -62,7 +62,9 @@ class TxnBrowserScreen(Screen[None]):
                 table.add_row(
                     tx.post_date,
                     description[:60],
-                    tx.business_category if hasattr(tx, 'business_category') else tx.category if hasattr(tx, 'category') else "?",
+                    (tx.business_category if hasattr(tx, 'business_category')
+                     else tx.category if hasattr(tx, 'category')
+                     else "?"),
                     f"${tx.amount:,.2f}",
                     "Credit" if tx.is_credit else "Debit",
                     "Yes" if (hasattr(tx, 'include_in_pnl') and tx.include_in_pnl) else "No",

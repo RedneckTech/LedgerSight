@@ -6,7 +6,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, Input, Label, Select, Static, Switch
+from textual.widgets import Button, Input, Label, Select, Static
 
 from ledgersight.tui.app import LedgerSightApp
 
@@ -138,8 +138,9 @@ class ConfigEditorScreen(Screen[None]):
                 cpa_phone=self.query_one("#cpa_phone", Input).value,
             )
             app.state.config = config
-            from ledgersight.constants import _DEFAULT_CONFIG
             from pathlib import Path
+
+            from ledgersight.constants import _DEFAULT_CONFIG
             app.state.config_path = Path(_DEFAULT_CONFIG)
             await app.goto_screen("statements")
 

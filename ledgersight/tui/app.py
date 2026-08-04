@@ -18,8 +18,8 @@ from typing import TYPE_CHECKING
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
-from textual.screen import ModalScreen, Screen
+from textual.containers import VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import Footer, Header, ListItem, ListView, Static
 
 if TYPE_CHECKING:

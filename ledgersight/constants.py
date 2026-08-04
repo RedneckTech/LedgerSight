@@ -1,5 +1,6 @@
 """Shared constants for LedgerSight."""
 from __future__ import annotations
+
 import re
 from decimal import Decimal
 from pathlib import Path

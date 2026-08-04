@@ -1,6 +1,7 @@
 """Financial projection engine."""
 from __future__ import annotations
-from dataclasses import dataclass, field
+
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
@@ -56,7 +57,7 @@ class ProjectionEngine:
         sc = scenarios.get(scenario_name, {})
         rev_growth = Decimal(str(sc.get("monthly_revenue_growth", c.get("monthly_revenue_growth", 0.02))))
         exp_inflation = Decimal(str(c.get("monthly_expense_inflation", 0.02)))
-        payroll_growth = Decimal(str(c.get("payroll_growth", 0.02)))
+        _payroll_growth = Decimal(str(c.get("payroll_growth", 0.02)))  # noqa: F841
         cogs_pct = Decimal(str(c.get("cogs_percentage", 0.0)))
         tax_reserve_pct = Decimal(str(c.get("tax_reserve_pct", 0.25)))
         min_cash = Decimal(str(c.get("min_cash_balance", 0)))
@@ -71,7 +72,7 @@ class ProjectionEngine:
             projection_start = date(date.today().year, date.today().month, 1) + timedelta(days=32)
             projection_start = date(projection_start.year, projection_start.month, 1)
         start_month_num = projection_start.month
-        start_year = projection_start.year
+        _start_year = projection_start.year  # noqa: F841
 
         monthly_rev: list[Decimal] = []
         monthly_exp: list[Decimal] = []

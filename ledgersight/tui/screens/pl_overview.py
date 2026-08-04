@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from textual import on
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Label, Static
 
@@ -61,12 +61,12 @@ class PLOverviewScreen(Screen[None]):
         table.add_row("[bold]Total Revenue[/bold]", f"${pl.total_revenue:,.2f}")
         table.add_row("[bold]Total COGS/Direct Costs[/bold]", f"(${pl.total_direct_costs:,.2f})")
         table.add_row("[bold green]Gross Profit[/bold green]", f"${pl.gross_profit:,.2f}")
-        table.add_row(f"  Gross Margin", pl.gross_margin)
+        table.add_row("  Gross Margin", pl.gross_margin)
         table.add_row("[bold]Total Operating Expenses[/bold]", f"(${pl.total_operating_expenses:,.2f})")
         table.add_row("[bold green]Operating Profit[/bold green]", f"${pl.operating_profit:,.2f}")
-        table.add_row(f"  Operating Margin", pl.operating_margin)
+        table.add_row("  Operating Margin", pl.operating_margin)
         table.add_row("[bold green]Net Profit[/bold green]", f"${pl.net_profit:,.2f}")
-        table.add_row(f"  Net Margin", pl.net_margin)
+        table.add_row("  Net Margin", pl.net_margin)
 
         # Non-P&L buckets
         if pl.non_pnl_credits or pl.non_pnl_debits:
