@@ -16,6 +16,94 @@ from ledgersight.models import BusinessConfig, CategoryRule, Transaction, Statem
 
 logger = logging.getLogger("ledgersight.config")
 
+VALID_DIRECTIONS = {"credit", "debit", "either"}
+
+
+def safe_float_or_none(value: Any) -> float | None:
+    """Try to convert *value* to float; return None on failure."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def validate_config(config: BusinessConfig) -> list[str]:
+    """Return a list of configuration error messages (empty = valid)."""
+    errors: list[str] = []
+
+    if not (1 <= config.fiscal_year_start <= 12):
+        errors.append(f"fiscal_year_start must be 1-12, got {config.fiscal_year_start}")
+
+    if config.entity_type not in VALID_ENTITY_TYPES:
+        errors.append(
+            f"entity_type '{config.entity_type}' is not valid; "
+            f"must be one of {sorted(VALID_ENTITY_TYPES)}"
+        )
+
+    if config.accounting_method not in ("cash", "accrual"):
+        errors.append(
+            f"accounting_method must be 'cash' or 'accrual', got '{config.accounting_method}'"
+        )
+
+    if not (2000 <= config.tax_year <= 2099):
+        errors.append(f"tax_year {config.tax_year} is outside the reasonable range 2000-2099")
+
+    if config.projection_config:
+        pc = config.projection_config
+
+        mg = pc.get("monthly_revenue_growth")
+        if mg is not None:
+            if safe_float_or_none(mg) is None:
+                errors.append(
+                    f"projection_config.monthly_revenue_growth must be a number, got '{mg}'"
+                )
+
+        for field_name in ("projection_months", "lookback_months"):
+            val = pc.get(field_name)
+            if val is not None:
+                if not isinstance(val, (int, float)) or isinstance(val, bool) or val <= 0:
+                    errors.append(
+                        f"projection_config.{field_name} must be > 0, got {val}"
+                    )
+
+        tr = pc.get("tax_reserve_pct")
+        if tr is not None:
+            f_tr = safe_float_or_none(tr)
+            if f_tr is None or not (0 <= f_tr <= 1):
+                errors.append(
+                    f"projection_config.tax_reserve_pct must be between 0 and 1, got {tr}"
+                )
+
+    for i, rule in enumerate(config.custom_rules):
+        if rule.direction not in VALID_DIRECTIONS:
+            errors.append(
+                f"custom_rules[{i}] direction must be one of {sorted(VALID_DIRECTIONS)}, "
+                f"got '{rule.direction}' (category='{rule.category}')"
+            )
+
+    for i, rule in enumerate(config.custom_rules):
+        if rule.deductibility not in VALID_DEDUCTIBILITY:
+            errors.append(
+                f"custom_rules[{i}] deductibility '{rule.deductibility}' is not valid; "
+                f"must be one of {sorted(VALID_DEDUCTIBILITY)} "
+                f"(category='{rule.category}')"
+            )
+
+    for key, value in config.merchant_aliases.items():
+        if not key or not key.strip():
+            errors.append("merchant_aliases contains an empty key")
+        if not value or not value.strip():
+            errors.append(f"merchant_aliases['{key}'] has an empty value")
+
+    return errors
+
+
+def validate_config_strict(config: BusinessConfig) -> None:
+    """Raise ValueError if *config* fails validation."""
+    errors = validate_config(config)
+    if errors:
+        raise ValueError("\n".join(errors))
+
 # =============================================================================
 # Example TOML Configuration
 # =============================================================================
@@ -301,6 +389,10 @@ def load_config(config_path: Path, was_explicit: bool = False) -> BusinessConfig
             config_path.resolve(),
         )
         sys.exit(1)
+
+    errors = validate_config(config)
+    for err in errors:
+        logger.warning("Config validation: %s", err)
 
     return config
 

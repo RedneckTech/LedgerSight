@@ -16,6 +16,7 @@ from ledgersight.parsers import (
     parse_statement,
     extract_text,
     file_hash,
+    validate_statement,
 )
 from ledgersight.business.periods import _fiscal_quarter_months
 from ledgersight.categorizer import TransactionCategorizer
@@ -179,6 +180,10 @@ Examples:
             text = extract_text(pdf_path)
             stmt = parse_statement(text, str(pdf_path))
             if stmt.transactions:
+                warnings = validate_statement(stmt)
+                if warnings:
+                    for w in warnings:
+                        logger.warning("%s: %s", pdf_path.name, w)
                 statements.append(stmt)
             else:
                 logger.warning("No transactions parsed from: %s", pdf_path)
@@ -304,4 +309,5 @@ Examples:
         full_detail=args.full_detail,
         do_projections=args.projections,
         allow_review_items=args.allow_review_items,
+        overwrite=args.overwrite,
     )

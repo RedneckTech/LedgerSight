@@ -134,6 +134,7 @@ class GenerateScreen(Screen[None]):
                 allow_mismatch=False,
                 strict=False,
                 full_detail=True,
+                overwrite=True,
             )
 
             progress.update(progress=100)

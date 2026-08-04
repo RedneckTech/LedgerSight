@@ -58,6 +58,9 @@ class ReportPDF(FPDF):
         self.generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
         self.set_auto_page_break(auto=True, margin=18)
         self.set_margins(12, 12, 12)
+        self._use_dejavu = False
+        self.body_font = "Helvetica"
+        self.mono_font = "Courier"
         self._setup_fonts()
         self.set_title(title)
         self.set_author("LedgerSight")
@@ -70,13 +73,18 @@ class ReportPDF(FPDF):
             self.add_font("DJV", "I", self.DEJAVU_SANS)
             self.add_font("DJVM", "", self.DEJAVU_MONO)
             self.add_font("DJVM", "B", self.DEJAVU_MONO_BOLD)
+            self._use_dejavu = True
+            self.body_font = "DJV"
+            self.mono_font = "DJVM"
         else:
-            pass
+            self._use_dejavu = False
+            self.body_font = "Helvetica"
+            self.mono_font = "Courier"
 
     def header(self):
         if self.page_no() <= 1:
             return
-        self.set_font("DJV", "I", 7)
+        self.set_font(self.body_font, "I", 7)
         self.set_text_color(120, 120, 120)
         title_short = self._report_title[:80]
         self.cell(0, 4, title_short, align="L")
@@ -86,7 +94,7 @@ class ReportPDF(FPDF):
 
     def footer(self):
         self.set_y(-15)
-        self.set_font("DJV", "I", 6)
+        self.set_font(self.body_font, "I", 6)
         self.set_text_color(150, 150, 150)
         self.cell(
             0, 8,
@@ -95,7 +103,7 @@ class ReportPDF(FPDF):
         )
 
     def section_title(self, text: str):
-        self.set_font("DJV", "B", 14)
+        self.set_font(self.body_font, "B", 14)
         self.set_text_color(44, 62, 80)
         self.cell(0, 8, text, new_x="LMARGIN", new_y="NEXT")
         self.set_draw_color(44, 62, 80)
@@ -104,25 +112,25 @@ class ReportPDF(FPDF):
         self.start_section(text)
 
     def sub_title(self, text: str):
-        self.set_font("DJV", "B", 11)
+        self.set_font(self.body_font, "B", 11)
         self.set_text_color(52, 73, 94)
         self.cell(0, 6, text, new_x="LMARGIN", new_y="NEXT")
         self.ln(2)
 
     def body_text(self, text: str, size: int = 9):
-        self.set_font("DJV", "", size)
+        self.set_font(self.body_font, "", size)
         self.set_text_color(50, 50, 50)
         self.multi_cell(0, 4.5, text)
         self.ln(1)
 
     def body_text_small(self, text: str, size: int = 7):
-        self.set_font("DJV", "", size)
+        self.set_font(self.body_font, "", size)
         self.set_text_color(80, 80, 80)
         self.multi_cell(0, 3.5, text)
         self.ln(1)
 
     def truncate_text(self, text: str, width_mm: float, font_size: int = 7) -> str:
-        self.set_font("DJV", "", font_size)
+        self.set_font(self.body_font, "", font_size)
         if self.get_string_width(text) <= width_mm:
             return text
         ellipsis = "..."
@@ -178,7 +186,7 @@ class ReportPDF(FPDF):
                 remaining = remaining[available:]
 
                 if not first_page and section_label:
-                    self.set_font("DJV", "I", 7)
+                    self.set_font(self.body_font, "I", 7)
                     self.set_text_color(100, 100, 100)
                     self.cell(0, 4, f"{section_label} (continued)", new_x="LMARGIN", new_y="NEXT")
                     self.ln(1)
@@ -195,7 +203,7 @@ class ReportPDF(FPDF):
     ):
         self.set_fill_color(*header_color)
         self.set_text_color(255, 255, 255)
-        self.set_font("DJV", "B", header_font_size)
+        self.set_font(self.body_font, "B", header_font_size)
         for i, h in enumerate(headers):
             self.cell(col_widths[i], 6, h, border=0, fill=True, align="C")
         self.ln()
@@ -206,7 +214,7 @@ class ReportPDF(FPDF):
             else:
                 self.set_fill_color(255, 255, 255)
             self.set_text_color(50, 50, 50)
-            self.set_font("DJV", "", row_font_size)
+            self.set_font(self.body_font, "", row_font_size)
             for i, cell_text in enumerate(row):
                 truncated = self.truncate_text(str(cell_text), col_widths[i], row_font_size)
                 self.cell(
@@ -238,9 +246,9 @@ class ReportPDF(FPDF):
             if self.get_y() > self.h - 20:
                 self.add_page()
             self.set_fill_color(245, 245, 245)
-            self.set_font("DJV", "B", font_size)
+            self.set_font(self.body_font, "B", font_size)
             self.set_text_color(50, 50, 50)
             self.cell(col_widths[0], 7, f"  {label}", fill=True)
-            self.set_font("DJV", "", font_size)
+            self.set_font(self.body_font, "", font_size)
             self.cell(col_widths[1], 7, val, fill=True, align="R", new_x="LMARGIN", new_y="NEXT")
         self.ln(3)
