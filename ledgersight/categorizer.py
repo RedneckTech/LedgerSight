@@ -259,7 +259,7 @@ def build_default_rules() -> list[CategoryRule]:
                 rule.include_in_pnl = False
                 rule.direction = "debit"
             elif cat in ("Refund", "Reimbursement"):
-                rule.include_in_pnl = False
+                rule.include_in_pnl = True
                 rule.direction = "debit"
             elif cat in ("Opening Balance", "Uncategorized", "CPA Review Required"):
                 rule.include_in_pnl = False

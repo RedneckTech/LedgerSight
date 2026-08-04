@@ -8,7 +8,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Label, Static
+from textual.widgets import Button, DataTable, Input, Label, Static
 
 from ledgersight.tui.app import LedgerSightApp
 
@@ -33,10 +33,15 @@ class StatementsScreen(Screen[None]):
     """
 
     def compose(self) -> ComposeResult:
+        app = self.app
+        if isinstance(app, LedgerSightApp):
+            data_dir = app.state.data_dir
+        else:
+            data_dir = "data/business"
         yield Static("Statement Loading", classes="section-title")
         with Horizontal():
-            yield Label("Data directory: ")
-            yield Static("data/business/", id="data-dir")
+            yield Input(placeholder="data/business", id="data-dir-input", value=data_dir)
+            yield Button("Browse", id="btn-browse-dir")
         with Horizontal():
             yield Button("Load Statements", id="btn-load", variant="primary")
             yield Button("Back", id="btn-back")
@@ -52,6 +57,14 @@ class StatementsScreen(Screen[None]):
         self.query_one("#stmt-summary", Label).update("Loading statements...")
         loader = self._load_statements_worker()
         self.run_worker(loader, exclusive=True)
+
+    @on(Button.Pressed, "#btn-browse-dir")
+    def _browse_dir(self) -> None:
+        app = self.app
+        if isinstance(app, LedgerSightApp):
+            dir_val = self.query_one("#data-dir-input", Input).value.strip()
+            if dir_val:
+                app.state.data_dir = dir_val
 
     async def _load_statements_worker(self) -> None:
         app = self.app
@@ -69,10 +82,10 @@ class StatementsScreen(Screen[None]):
 
         logger = logging.getLogger("ledgersight.tui")
 
-        data_dir = Path("data/business")
+        data_dir = Path(app.state.data_dir)
         if not data_dir.exists():
             self.query_one("#stmt-summary", Label).update(
-                "No data/business/ directory found."
+                f"No {data_dir}/ directory found."
             )
             return
 

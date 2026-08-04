@@ -143,7 +143,10 @@ Examples:
         config.business_name = args.business_name
     if args.year:
         config.tax_year = args.year
-    if args.mask or args.mask_ein:
+    if args.mask:
+        config.mask_ein = True
+        config.mask_account = True
+    elif args.mask_ein:
         config.mask_ein = True
     if args.projection_months:
         if not config.projection_config:

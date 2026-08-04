@@ -33,7 +33,11 @@ def validate_config(config: BusinessConfig) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
 
-    if not (1 <= config.fiscal_year_start <= 12):
+    if not isinstance(config.fiscal_year_start, int) or isinstance(config.fiscal_year_start, bool):
+        errors.append(
+            f"fiscal_year_start must be an integer, got {type(config.fiscal_year_start).__name__}"
+        )
+    elif not 1 <= config.fiscal_year_start <= 12:
         errors.append(f"fiscal_year_start must be 1-12, got {config.fiscal_year_start}")
 
     if config.entity_type not in VALID_ENTITY_TYPES:
@@ -47,8 +51,17 @@ def validate_config(config: BusinessConfig) -> tuple[list[str], list[str]]:
             f"accounting_method must be 'cash' or 'accrual', got '{config.accounting_method}'"
         )
 
-    if not (2000 <= config.tax_year <= 2099):
+    if not isinstance(config.tax_year, int) or isinstance(config.tax_year, bool):
+        errors.append(
+            f"tax_year must be an integer, got {type(config.tax_year).__name__}"
+        )
+    elif not 2000 <= config.tax_year <= 2099:
         errors.append(f"tax_year {config.tax_year} is outside the reasonable range 2000-2099")
+
+    for bool_field in ("mask_ein", "mask_account"):
+        val = getattr(config, bool_field)
+        if not isinstance(val, bool):
+            errors.append(f"{bool_field} must be a boolean, got {type(val).__name__}")
 
     if config.projection_config:
         pc = config.projection_config

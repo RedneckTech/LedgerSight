@@ -7,12 +7,46 @@ from pathlib import Path
 
 from textual import on
 from textual.app import ComposeResult
-from textual.containers import Horizontal
-from textual.screen import Screen
+from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Label, ProgressBar, RichLog, Static
 
 from ledgersight.exceptions import LedgerSightError
 from ledgersight.tui.app import LedgerSightApp
+
+
+class OverwriteConfirm(ModalScreen[bool]):
+    """Modal asking user to confirm overwrite."""
+
+    DEFAULT_CSS = """
+    OverwriteConfirm {
+        align: center middle;
+    }
+    #dialog {
+        width: 50;
+        border: thick $warning;
+        background: $surface;
+        padding: 1 2;
+    }
+    """
+
+    def __init__(self, filename: str) -> None:
+        super().__init__()
+        self._filename = filename
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Static("Report already exists. Overwrite?")
+            yield Static(f"[bold]{self._filename}[/bold]")
+            with Horizontal():
+                yield Button("Cancel", id="btn-cancel", variant="primary")
+                yield Button("Replace", id="btn-replace", variant="error")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-replace":
+            self.dismiss(True)
+        else:
+            self.dismiss(False)
 
 
 class GenerateScreen(Screen[None]):
@@ -59,12 +93,38 @@ class GenerateScreen(Screen[None]):
         if not isinstance(app, LedgerSightApp):
             return
 
+        from ledgersight.config import load_config
+        from ledgersight.constants import _DEFAULT_CONFIG as _DEF_CFG
+
+        config = app.state.config
+        if config is None:
+            config = load_config(Path(_DEF_CFG))
+            app.state.config = config
+
+        base = f"business_financial_report_{app.state.report_year or config.tax_year}"
+        if app.state.report_month:
+            output_name = f"{base}-{app.state.report_month:02d}.pdf"
+        elif app.state.report_quarter:
+            output_name = f"{base}-FY{app.state.report_year}FQ{app.state.report_quarter}.pdf"
+        else:
+            output_name = f"{base}.pdf"
+        output_path = Path(output_name)
+        app.state.output_path = output_path
+
+        overwrite = False
+        if output_path.exists():
+            result = await self.app.push_screen(OverwriteConfirm(str(output_path.name)))
+            if not result:
+                self.query_one("#gen-status", Label).update("Cancelled.")
+                return
+            overwrite = True
+
         self.query_one("#btn-generate", Button).disabled = True
         self.query_one("#gen-status", Label).update("Generating report...")
 
-        self.run_worker(self._do_generate(), exclusive=True)
+        self.run_worker(self._do_generate(overwrite=overwrite), exclusive=True)
 
-    async def _do_generate(self) -> None:
+    async def _do_generate(self, overwrite: bool = False) -> None:
         app = self.app
         if not isinstance(app, LedgerSightApp):
             return
@@ -111,22 +171,7 @@ class GenerateScreen(Screen[None]):
                 log.write("[green]Reconciliation complete[/green]")
             progress.update(progress=30)
 
-            base = f"business_financial_report_{app.state.report_year or config.tax_year}"
-            if app.state.report_month:
-                output_name = f"{base}-{app.state.report_month:02d}.pdf"
-            elif app.state.report_quarter:
-                output_name = f"{base}-FY{app.state.report_year}FQ{app.state.report_quarter}.pdf"
-            else:
-                output_name = f"{base}.pdf"
-            output_path = Path(output_name)
-            app.state.output_path = output_path
-
-            if output_path.exists():
-                self.notify(
-                    f"Overwriting existing report: {output_path.name}",
-                    severity="warning",
-                    timeout=5,
-                )
+            output_path = app.state.output_path
 
             period_info = (
                 f"year={app.state.report_year or config.tax_year}, "
@@ -156,7 +201,7 @@ class GenerateScreen(Screen[None]):
                 allow_mismatch=False,
                 strict=False,
                 full_detail=True,
-                overwrite=True,
+                overwrite=overwrite,
             )
 
             if result:

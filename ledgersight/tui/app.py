@@ -33,6 +33,7 @@ class AppState:
 
     config: BusinessConfig | None = None
     config_path: Path | None = None
+    data_dir: str = "data/business"
     statements: list[Statement] = field(default_factory=list)
     recon_results: list[ReconciliationResult] = field(default_factory=list)
     all_reconciled: bool = False

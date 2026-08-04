@@ -170,7 +170,7 @@ class TestProfitAndLoss(unittest.TestCase):
         pl = build_pl(txs)
         self.assertEqual(pl.direct_costs["Materials and Supplies"], Decimal("900.00"),
                          "Should only reduce the $150 debit, not the $900 one")
-        self.assertEqual(pl.payment_reversals, Decimal("0"))
+        self.assertEqual(pl.payment_reversal_credits, Decimal("0"))
 
     def test_reversal_does_not_reuse_matched_debit(self):
         txs = [
@@ -187,7 +187,7 @@ class TestProfitAndLoss(unittest.TestCase):
         pl = build_pl(txs)
         self.assertEqual(pl.direct_costs["Fuel"], Decimal("0"),
                          "First $150 reversal should cancel the $150 debit")
-        self.assertEqual(pl.payment_reversals, Decimal("150.00"),
+        self.assertEqual(pl.payment_reversal_credits, Decimal("150.00"),
                          "Second $150 reversal should go to review bucket")
 
     def test_reversal_no_close_match_goes_to_review_bucket(self):
@@ -197,7 +197,7 @@ class TestProfitAndLoss(unittest.TestCase):
                     business_category="Payment Reversal", include_in_pnl=False),
         ]
         pl = build_pl(txs)
-        self.assertEqual(pl.payment_reversals, Decimal("50.00"),
+        self.assertEqual(pl.payment_reversal_credits, Decimal("50.00"),
                          "Reversal with no matching debits goes to review bucket")
 
     def test_reversal_does_not_match_future_debit(self):
@@ -209,7 +209,7 @@ class TestProfitAndLoss(unittest.TestCase):
         ]
         pl = build_pl(txs)
         self.assertEqual(pl.total_direct_costs, Decimal("150.00"))
-        self.assertGreater(pl.payment_reversals, Decimal("0"))
+        self.assertGreater(pl.payment_reversal_credits, Decimal("0"))
 
     def test_reversal_larger_than_debit(self):
         txs = [
@@ -220,7 +220,7 @@ class TestProfitAndLoss(unittest.TestCase):
         ]
         pl = build_pl(txs)
         self.assertEqual(pl.total_direct_costs, Decimal("0"))
-        self.assertGreater(pl.payment_reversals, Decimal("0"))
+        self.assertGreater(pl.payment_reversal_credits, Decimal("0"))
 
     def test_reversal_lookback_limit(self):
         txs = [
@@ -231,7 +231,7 @@ class TestProfitAndLoss(unittest.TestCase):
         ]
         pl = build_pl(txs)
         self.assertEqual(pl.total_direct_costs, Decimal("150.00"))
-        self.assertGreater(pl.payment_reversals, Decimal("0"))
+        self.assertGreater(pl.payment_reversal_credits, Decimal("0"))
 
 
 class TestProfitAndLossByPeriod(unittest.TestCase):
