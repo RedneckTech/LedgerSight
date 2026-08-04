@@ -15,6 +15,7 @@ import matplotlib.ticker as mticker
 
 from ledgersight.categorizer import normalize_merchant
 from ledgersight.models import Statement, Transaction
+from ledgersight.redaction import DataRedactor
 
 if TYPE_CHECKING:
     from business_financial_report import ProfitAndLoss, ProjectionResult
@@ -306,7 +307,9 @@ def chart_projection(
 
 
 def chart_top_vendors(
-    statements: list[Statement], top_n: int = 10,
+    statements: list[Statement],
+    top_n: int = 10,
+    redactor: DataRedactor | None = None,
 ) -> io.BytesIO:
     """Bar chart of top vendors by expense."""
     vendor_totals: dict[str, float] = defaultdict(float)
@@ -314,6 +317,8 @@ def chart_top_vendors(
         for tx in s.transactions:
             if not tx.is_credit and tx.include_in_pnl:
                 merchant = tx.merchant or normalize_merchant(tx.description)
+                if redactor is not None:
+                    merchant = redactor.merchant(merchant)
                 vendor_totals[merchant] += float(tx.amount)
 
     sorted_v = sorted(vendor_totals.items(), key=lambda x: x[1], reverse=True)[:top_n]
@@ -342,7 +347,9 @@ def chart_top_vendors(
 
 
 def chart_top_revenue_sources(
-    statements: list[Statement], top_n: int = 10,
+    statements: list[Statement],
+    top_n: int = 10,
+    redactor: DataRedactor | None = None,
 ) -> io.BytesIO:
     """Bar chart of top revenue sources."""
     source_totals: dict[str, float] = defaultdict(float)
@@ -350,6 +357,8 @@ def chart_top_revenue_sources(
         for tx in s.transactions:
             if tx.is_credit and tx.include_in_pnl:
                 merchant = tx.merchant or normalize_merchant(tx.description)
+                if redactor is not None:
+                    merchant = redactor.merchant(merchant)
                 source_totals[merchant] += float(tx.amount)
 
     sorted_v = sorted(source_totals.items(), key=lambda x: x[1], reverse=True)[:top_n]

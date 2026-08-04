@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 import sys
 from collections import defaultdict
 from datetime import date, datetime, timedelta
@@ -11,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from ledgersight.models import Statement, Transaction, BusinessConfig, ReconciliationResult
+from ledgersight.redaction import DataRedactor
 from ledgersight.charts import (
     _empty_chart_buf, chart_revenue_vs_expenses_monthly, chart_profit_monthly,
     chart_net_cash_flow, chart_balance_trend, chart_expenses_by_category,
@@ -27,7 +27,7 @@ from ledgersight.pdf_renderer import ReportPDF
 from ledgersight.business.pl import ProfitAndLoss, build_pl, build_monthly_pls, build_quarterly_pls
 from ledgersight.business.kpis import FinancialKPIs, calculate_kpis
 from ledgersight.business.projections import ProjectionResult, ProjectionEngine
-from ledgersight.business.periods import _fiscal_quarter_months
+from ledgersight.business.periods import _fiscal_quarter_months, fiscal_quarter_range
 from ledgersight.reconciliation import reconcile_all
 
 logger = logging.getLogger("ledgersight.business.report")
@@ -62,6 +62,7 @@ class ReportBuilder:
         period_start_date: date | None = None,
         period_end_date: date | None = None,
         mode: str = "combined",
+        redactor: DataRedactor | None = None,
     ):
         self.statements = statements
         self.config = config
@@ -80,6 +81,7 @@ class ReportBuilder:
         self.period_start_date = period_start_date
         self.period_end_date = period_end_date
         self.mode = mode
+        self.redactor = redactor or DataRedactor(mask_personal=False)
 
     def build(self) -> ReportPDF:
         report_title = f"Business Financial Report - {self.config.display_name()}"
@@ -145,23 +147,7 @@ class ReportBuilder:
         return pdf
 
     def _mask_text(self, text: str) -> str:
-        if not self.mask_personal:
-            return text
-        text = re.sub(
-            r"\b\d+\s+(?:[NSEW]\s+)?"
-            r"[A-Z0-9.'-]+(?:\s+[A-Z0-9.'-]+){0,4}\s+"
-            r"(?:RD|ROAD|ST|STREET|AVE|AVENUE|DR|DRIVE|LN|LANE|"
-            r"WAY|BLVD|BOULEVARD)\b",
-            "[ADDRESS REDACTED]",
-            text,
-            flags=re.IGNORECASE,
-        )
-        for owner in self.config.owners:
-            parts = owner.split()
-            for part in parts:
-                if len(part) > 2:
-                    text = re.sub(re.escape(part), "[NAME REDACTED]", text, flags=re.IGNORECASE)
-        return text
+        return self.redactor.description(text)
 
     def _cover_page(self, pdf: ReportPDF):
         pdf.add_page()
@@ -799,7 +785,7 @@ class ReportBuilder:
         pdf.add_page()
         pdf.section_title("Top Customers / Income Sources")
 
-        buf = chart_top_revenue_sources(self.statements)
+        buf = chart_top_revenue_sources(self.statements, redactor=self.redactor)
         pdf.embed_chart(buf, w=pdf.w - pdf.l_margin - pdf.r_margin)
         buf.close()
 
@@ -824,7 +810,7 @@ class ReportBuilder:
         pdf.add_page()
         pdf.section_title("Top Vendors and Payees")
 
-        buf = chart_top_vendors(self.statements)
+        buf = chart_top_vendors(self.statements, redactor=self.redactor)
         pdf.embed_chart(buf, w=pdf.w - pdf.l_margin - pdf.r_margin)
         buf.close()
 
@@ -1916,17 +1902,28 @@ def build_report(
     full_detail: bool = False,
     do_projections: bool = False,
     allow_review_items: bool = False,
+    overwrite: bool = False,
 ) -> None:
     """Orchestrate the full report build process."""
 
-    if target_year:
-        statements = [s for s in statements if s.year == target_year]
-    if target_month:
-        statements = [s for s in statements if s.month == target_month]
     if target_quarter:
         fys = config.fiscal_year_start
-        fy_quarter_months = _fiscal_quarter_months(target_quarter, fys)
-        statements = [s for s in statements if s.month in fy_quarter_months]
+        fy = target_year if target_year else statements[0].year
+        q_start, q_end = fiscal_quarter_range(fy, target_quarter, fys)
+        statements = [
+            s for s in statements
+            if s.date_obj >= q_start and s.date_obj <= q_end
+        ]
+        if target_year:
+            logger.info(
+                "Fiscal quarter: FY%d Q%d (%s – %s)",
+                fy, target_quarter, q_start, q_end,
+            )
+    else:
+        if target_year:
+            statements = [s for s in statements if s.year == target_year]
+        if target_month:
+            statements = [s for s in statements if s.month == target_month]
 
     if not statements:
         logger.error("No statements found matching filters.")
@@ -2080,10 +2077,46 @@ def build_report(
             )
             sys.exit(1)
 
+    if start_date_str or end_date_str:
+        logger.warning(
+            "Date-range filter active: P&L and KPIs are computed from transactions "
+            "between %s and %s only. Source bank statements were reconciled in full; "
+            "the filtered transaction subset was NOT independently reconciled to "
+            "opening and closing bank balances.",
+            start_date_str or "the beginning",
+            end_date_str or "the end",
+        )
+
     period_start_date = (datetime.strptime(start_date_str, "%Y-%m-%d").date()
                          if start_date_str else None)
     period_end_date = (datetime.strptime(end_date_str, "%Y-%m-%d").date()
                        if end_date_str else None)
+
+    # Pre-flight: check all output paths for overwrite conflicts
+    output_paths_to_check: list[Path] = [output_path]
+    if audit_path:
+        output_paths_to_check.append(audit_path)
+    if pl_csv_path:
+        output_paths_to_check.append(pl_csv_path)
+    if cpa_export_dir:
+        output_paths_to_check.extend([
+            cpa_export_dir / fn for fn in (
+                "cpa_revenue_detail.csv", "cpa_expense_detail.csv",
+                "cpa_uncategorized.csv", "cpa_reconciliation.csv",
+                "cpa_fixed_assets.csv", "cpa_loan_activity.csv",
+                "cpa_owner_activity.csv",
+            )
+        ])
+    existing = [p for p in output_paths_to_check if p.exists()]
+    if existing and not overwrite:
+        paths_str = "\n  ".join(str(p) for p in existing)
+        logger.error(
+            "Output file(s) already exist. Use --overwrite to replace:\n  %s",
+            paths_str,
+        )
+        sys.exit(1)
+
+    redactor = DataRedactor(mask_personal=mask_personal, redact_names=owner_names)
     builder = ReportBuilder(
         statements=report_statements,
         config=config,
@@ -2102,6 +2135,7 @@ def build_report(
         period_start_date=period_start_date,
         period_end_date=period_end_date,
         mode=mode,
+        redactor=redactor,
     )
 
     if mode == "cpa":
@@ -2115,9 +2149,9 @@ def build_report(
     logger.info("Report saved to: %s", output_path)
 
     exporter = CSVExporter(report_statements, config, pl, projections,
-                           recon_results=recon_results)
+                           recon_results=recon_results, redactor=redactor)
     if audit_path:
-        exporter.export_audit(audit_path, mask_personal)
+        exporter.export_audit(audit_path)
     if pl_csv_path:
         exporter.export_pl(pl_csv_path)
     if cpa_export_dir:

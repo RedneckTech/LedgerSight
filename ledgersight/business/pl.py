@@ -8,6 +8,33 @@ from ledgersight.categorizer import _INCOME_CATEGORIES, _EXPENSE_CATEGORIES, nor
 from ledgersight.models import Statement, Transaction
 from ledgersight.parsers import safe_pct
 
+_AMOUNT_TOLERANCE = Decimal("0.2")
+
+
+def _find_best_reversal_match(
+    reversal_tx: Transaction,
+    candidates: list[tuple[int, Transaction]],
+) -> tuple[int, Transaction] | None:
+    reversal_amount = reversal_tx.amount
+    reversal_date = reversal_tx.date_obj
+    best = None
+    best_score = Decimal("-1")
+
+    for idx, dt in candidates:
+        if reversal_amount == 0 or dt.amount == 0:
+            ratio = Decimal("0")
+        else:
+            ratio = min(reversal_amount, dt.amount) / max(reversal_amount, dt.amount)
+        if ratio < (Decimal("1") - _AMOUNT_TOLERANCE):
+            continue
+        delta_days = abs((reversal_date - dt.date_obj).days)
+        score = ratio - Decimal(delta_days) / Decimal("36500")
+        if score > best_score:
+            best_score = score
+            best = (idx, dt)
+
+    return best
+
 
 class ProfitAndLoss:
     """Cash-basis Profit & Loss statement built from categorized transactions."""
@@ -89,15 +116,17 @@ class ProfitAndLoss:
         return safe_pct(self.net_profit, self.total_revenue)
 
 
-_INCOME_CAT_SET = set(_INCOME_CATEGORIES.keys())
+_OTHER_INCOME_CATS = {"Interest Income", "Other Income"}
+_OTHER_EXPENSE_CATS = {"Loan Interest"}
 _DIRECT_COST_CATS = {
     "Fuel", "Freight and Shipping", "Subcontractors", "Direct Labor",
     "Materials and Supplies", "Equipment Rental", "Tolls and Scale Fees",
     "Other Direct Costs",
 }
-_OP_EXPENSE_CATS = set(_EXPENSE_CATEGORIES.keys()) - _DIRECT_COST_CATS
-_OTHER_INCOME_CATS = {"Interest Income", "Other Income"}
-_OTHER_EXPENSE_CATS = {"Loan Interest"}
+_INCOME_CAT_SET = set(_INCOME_CATEGORIES.keys()) - _OTHER_INCOME_CATS
+_OP_EXPENSE_CATS = (
+    set(_EXPENSE_CATEGORIES.keys()) - _DIRECT_COST_CATS - _OTHER_EXPENSE_CATS
+)
 
 
 def build_pl(
@@ -114,11 +143,13 @@ def build_pl(
     name so the corresponding expense category is reduced.
     """
     # Pre-build a lookup of debit transactions by merchant for reversal matching
-    debit_by_merchant: dict[str, list[Transaction]] = {}
-    for tx in transactions:
+    debit_by_merchant: dict[str, list[tuple[int, Transaction]]] = {}
+    for idx, tx in enumerate(transactions):
         if not tx.is_credit and not tx.is_transfer:
             m = normalize_merchant(tx.description)
-            debit_by_merchant.setdefault(m, []).append(tx)
+            debit_by_merchant.setdefault(m, []).append((idx, tx))
+
+    matched_debit_indices: set[int] = set()
 
     pl = ProfitAndLoss(label=label)
     for tx in transactions:
@@ -154,9 +185,13 @@ def build_pl(
         # ---- Payment reversals — try to match to original expense ----
         if cat == "Payment Reversal" and tx.is_credit:
             merchant = normalize_merchant(tx.description)
-            matched = debit_by_merchant.get(merchant) or []
-            if matched:
-                orig_cat = matched[0].business_category
+            candidates = [(idx, dt) for idx, dt in debit_by_merchant.get(merchant, [])
+                          if idx not in matched_debit_indices]
+            best = _find_best_reversal_match(tx, candidates) if candidates else None
+            if best is not None:
+                best_idx, best_dt = best
+                matched_debit_indices.add(best_idx)
+                orig_cat = best_dt.business_category
                 if orig_cat in _DIRECT_COST_CATS:
                     pl.direct_costs[orig_cat] -= tx.amount
                 elif orig_cat in _OP_EXPENSE_CATS:

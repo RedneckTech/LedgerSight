@@ -2,7 +2,6 @@
 from __future__ import annotations
 import csv
 import logging
-import re
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,11 +13,19 @@ from ledgersight.models import (
     Statement,
     Transaction,
 )
+from ledgersight.redaction import DataRedactor
 
 if TYPE_CHECKING:
     from ledgersight.business.pl import ProfitAndLoss, ProjectionResult
 
 logger = logging.getLogger("ledgersight.exports")
+
+def _safe_csv_cell(value: object) -> str:
+    text = str(value)
+    if text and text[0] in ("=", "+", "-", "@"):
+        return "'" + text
+    return text
+
 
 _FIXED_ASSET_EXCLUDED_CATS: set[str] = {
     "Payroll", "Payroll Taxes", "Bank and Merchant Fees",
@@ -61,16 +68,19 @@ class CSVExporter:
         pl: ProfitAndLoss,
         projections: list[ProjectionResult] | None = None,
         recon_results: list[ReconciliationResult] | None = None,
+        redactor: DataRedactor | None = None,
     ):
         self.statements = statements
         self.config = config
         self.pl = pl
         self.projections = projections or []
         self.recon_results = recon_results or []
+        self.redactor = redactor
 
-    def export_audit(self, path: Path, mask_personal: bool = False):
+    def export_audit(self, path: Path):
         """Export full transaction audit CSV."""
-        with open(path, "w", newline="") as f:
+        redactor = self.redactor or DataRedactor(mask_personal=False)
+        with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow([
                 "Statement", "PostDate", "Description", "Amount", "Type", "Balance",
@@ -80,45 +90,42 @@ class CSVExporter:
             ])
             for stmt in self.statements:
                 for tx in stmt.transactions:
-                    desc = tx.description
-                    if mask_personal:
-                        desc = re.sub(
-                            r"\b\d+\s+(?:[NSEW]\s+)?[A-Z0-9.'-]+(?:\s+[A-Z0-9.'-]+){0,4}\s+(?:RD|ROAD|ST|STREET|AVE|AVENUE|DR|DRIVE|LN|LANE|WAY|BLVD|BOULEVARD)\b",
-                            "[ADDRESS REDACTED]", desc, flags=re.IGNORECASE,
-                        )
+                    desc = redactor.description(tx.description)
+                    merchant = tx.merchant or normalize_merchant(tx.description)
+                    merchant = redactor.merchant(merchant)
                     writer.writerow([
                         stmt.month_label,
                         tx.post_date,
-                        desc,
+                        _safe_csv_cell(desc),
                         str(tx.amount if tx.is_credit else -tx.amount),
                         "Credit" if tx.is_credit else "Debit",
                         str(tx.balance),
-                        tx.business_category,
-                        tx.tax_category,
+                        _safe_csv_cell(tx.business_category),
+                        _safe_csv_cell(tx.tax_category),
                         "Yes" if tx.include_in_pnl else "No",
-                        tx.deductibility,
+                        _safe_csv_cell(tx.deductibility),
                         "Yes" if tx.cpa_review else "No",
-                        tx.review_reason,
-                        tx.merchant or normalize_merchant(tx.description),
+                        _safe_csv_cell(tx.review_reason),
+                        _safe_csv_cell(merchant),
                         "Yes" if tx.is_transfer else "No",
                         "Yes" if tx.is_owner_related else "No",
                         "Yes" if tx.is_fixed_asset else "No",
                         "Yes" if tx.is_loan else "No",
-                        tx.source_statement,
+                        _safe_csv_cell(redactor.source_path(tx.source_statement)),
                     ])
         logger.info("Audit CSV saved to: %s", path)
 
     def export_pl(self, path: Path):
         """Export P&L CSV."""
-        with open(path, "w", newline="") as f:
+        with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["Category", "Type", "Amount"])
             for cat, val in sorted(self.pl.revenue.items()):
-                writer.writerow([cat, "Revenue", str(val)])
+                writer.writerow([_safe_csv_cell(cat), "Revenue", str(val)])
             for cat, val in sorted(self.pl.direct_costs.items()):
-                writer.writerow([cat, "COGS/Direct Cost", str(val)])
+                writer.writerow([_safe_csv_cell(cat), "COGS/Direct Cost", str(val)])
             for cat, val in sorted(self.pl.operating_expenses.items()):
-                writer.writerow([cat, "Operating Expense", str(val)])
+                writer.writerow([_safe_csv_cell(cat), "Operating Expense", str(val)])
             writer.writerow(["Total Revenue", "Revenue", str(self.pl.total_revenue)])
             writer.writerow(["Total COGS", "COGS", str(self.pl.total_direct_costs)])
             writer.writerow(["Gross Profit", "Profit", str(self.pl.gross_profit)])
@@ -130,42 +137,44 @@ class CSVExporter:
     def export_cpa(self, output_dir: Path):
         """Export CPA package CSV files."""
         output_dir.mkdir(parents=True, exist_ok=True)
+        redactor = self.redactor or DataRedactor(mask_personal=False)
 
         self._write_csv(output_dir / "cpa_revenue_detail.csv",
                         ["Date", "Description", "Category", "Amount"],
-                        [[tx.post_date, tx.description, tx.business_category, str(tx.amount)]
+                        [[tx.post_date, redactor.description(tx.description), tx.business_category, str(tx.amount)]
                          for s in self.statements for tx in s.transactions
                          if tx.is_credit and tx.include_in_pnl])
 
         self._write_csv(output_dir / "cpa_expense_detail.csv",
                         ["Date", "Description", "Category", "TaxCategory", "Amount", "Deductibility", "CPAReview"],
-                        [[tx.post_date, tx.description, tx.business_category, tx.tax_category,
+                        [[tx.post_date, redactor.description(tx.description), tx.business_category, tx.tax_category,
                           str(tx.amount), tx.deductibility, "Yes" if tx.cpa_review else "No"]
                          for s in self.statements for tx in s.transactions
                          if not tx.is_credit and tx.include_in_pnl])
 
         self._write_csv(output_dir / "cpa_fixed_assets.csv",
                         ["Date", "Vendor", "Description", "Amount"],
-                        [[tx.post_date, normalize_merchant(tx.description), tx.description, str(tx.amount)]
+                        [[tx.post_date, redactor.merchant(normalize_merchant(tx.description)),
+                          redactor.description(tx.description), str(tx.amount)]
                          for tx in get_fixed_asset_candidates(self.statements)])
 
         self._write_csv(output_dir / "cpa_loan_activity.csv",
                         ["Date", "Description", "Category", "Amount", "Type"],
-                        [[tx.post_date, tx.description, tx.business_category,
+                        [[tx.post_date, redactor.description(tx.description), tx.business_category,
                           str(tx.amount), "Credit" if tx.is_credit else "Debit"]
                          for s in self.statements for tx in s.transactions
                          if tx.is_loan or "LOAN" in tx.description.upper()])
 
         self._write_csv(output_dir / "cpa_owner_activity.csv",
                         ["Date", "Description", "Category", "Amount", "Type"],
-                        [[tx.post_date, tx.description, tx.business_category,
+                        [[tx.post_date, redactor.description(tx.description), tx.business_category,
                           str(tx.amount), "Contribution" if tx.is_credit else "Draw"]
                          for s in self.statements for tx in s.transactions
                          if tx.is_owner_related or tx.business_category in ("Owner Contribution", "Owner Draw or Distribution")])
 
         self._write_csv(output_dir / "cpa_uncategorized.csv",
                         ["Date", "Description", "Amount", "Type", "ReviewReason"],
-                        [[tx.post_date, tx.description, str(tx.amount),
+                        [[tx.post_date, redactor.description(tx.description), str(tx.amount),
                           "Credit" if tx.is_credit else "Debit", tx.review_reason]
                          for s in self.statements for tx in s.transactions
                          if tx.cpa_review])
@@ -207,14 +216,15 @@ class CSVExporter:
         logger.info("CPA CSV files saved to: %s", output_dir)
 
     def _write_csv(self, path: Path, headers: list[str], rows: list[list[str]]):
-        with open(path, "w", newline="") as f:
+        with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(headers)
             for row in rows:
-                writer.writerow(row)
+                writer.writerow([_safe_csv_cell(cell) for cell in row])
 
     def export_category_template(self, path: Path):
         """Export a CSV with all detected merchants and their current categories."""
+        redactor = self.redactor or DataRedactor(mask_personal=False)
         merchants: dict[str, dict] = {}
         for s in self.statements:
             for tx in s.transactions:
@@ -229,12 +239,13 @@ class CSVExporter:
                 merchants[m]["count"] += 1
                 merchants[m]["total"] += tx.amount
 
-        with open(path, "w", newline="") as f:
+        with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["Merchant", "CurrentBusinessCategory", "CurrentTaxCategory",
                              "TransactionCount", "TotalAmount",
                              "SuggestedBusinessCategory", "SuggestedTaxCategory"])
             for m, info in sorted(merchants.items(), key=lambda x: x[1]["total"], reverse=True):
-                writer.writerow([m, info["category"], info["tax_category"],
+                writer.writerow([_safe_csv_cell(redactor.merchant(m)), _safe_csv_cell(info["category"]),
+                                 _safe_csv_cell(info["tax_category"]),
                                  str(info["count"]), str(info["total"]), "", ""])
         logger.info("Category template saved to: %s", path)
