@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "ledgersight"
 version = "0.1.0"
 description = "Bank-statement-to-financial-report pipeline with TUI"
-readme = "LICENSE"
+readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.14"
 classifiers = [
