@@ -10,7 +10,6 @@ Keybindings:
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -50,6 +49,7 @@ class AppState:
     export_pl: bool = False
     export_cpa: bool = False
     scenario: str = "base"
+    mask_personal: bool = False
     output_path: Path | None = None
 
 
@@ -230,8 +230,8 @@ class LedgerSightApp(App[None]):
             await super().push_screen(PLOverviewScreen())
 
     def _update_sidebar_highlight(self, screen_id: str) -> None:
-        for i, label in enumerate(SIDEBAR_LABELS):
-            if label == SIDEBAR_LABELS.get(screen_id, ""):
+        for i, current_id in enumerate(SIDEBAR_LABELS):
+            if current_id == screen_id:
                 if hasattr(self.sidebar_list, "index"):
                     self.sidebar_list.index = i
                 break
@@ -251,18 +251,18 @@ class LedgerSightApp(App[None]):
         else:
             sidebar.remove_class("-visible")
 
-    def action_next_screen(self) -> None:
+    async def action_next_screen(self) -> None:
         screen = self.screen
         if hasattr(screen, "navigate_next"):
-            screen.navigate_next()
+            await screen.navigate_next()
 
-    def action_prev_screen(self) -> None:
+    async def action_prev_screen(self) -> None:
         screen = self.screen
         if hasattr(screen, "navigate_prev"):
-            screen.navigate_prev()
+            await screen.navigate_prev()
 
-    def action_goto_generate(self) -> None:
-        asyncio.create_task(self.push_screen("generate"))
+    async def action_goto_generate(self) -> None:
+        await self.push_screen("generate")
 
     # ------------------------------------------------------------------
     # Sidebar click handling

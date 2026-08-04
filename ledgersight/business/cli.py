@@ -3,23 +3,16 @@ from __future__ import annotations
 
 import argparse
 import logging
-import subprocess
 import sys
 from pathlib import Path
 
+from ledgersight.business.loader import load_statements
 from ledgersight.business.periods import _fiscal_quarter_months
 from ledgersight.business.report import build_report
 from ledgersight.config import generate_example_config, load_config
 from ledgersight.constants import _DEFAULT_CONFIG
-from ledgersight.models import Statement
-from ledgersight.parsers import (
-    check_pdftotext,
-    extract_text,
-    file_hash,
-    find_pdfs,
-    parse_statement,
-    validate_statement,
-)
+from ledgersight.exceptions import LedgerSightError
+from ledgersight.parsers import find_pdfs
 
 logger = logging.getLogger("ledgersight.business.cli")
 
@@ -130,8 +123,6 @@ Examples:
         generate_example_config(cfg_path, force=args.force)
         return
 
-    check_pdftotext()
-
     if args.config:
         config_path = Path(args.config)
     else:
@@ -146,7 +137,7 @@ Examples:
             config_path = candidates[0] if candidates else default_path
     if not config_path.is_absolute():
         config_path = SCRIPT_DIR / config_path
-    config = load_config(config_path, was_explicit=bool(args.config))
+    config = load_config(config_path, was_explicit=args.config is not None, strict=True)
 
     if args.business_name:
         config.business_name = args.business_name
@@ -165,29 +156,12 @@ Examples:
         logger.error("No PDF files found in %s", directory)
         sys.exit(1)
 
-    seen_hashes: set[str] = set()
-    statements: list[Statement] = []
-    for pdf_path in pdf_files:
-        fhash = file_hash(pdf_path)
-        if fhash in seen_hashes:
-            logger.warning("Skipping duplicate file: %s", pdf_path)
-            continue
-        seen_hashes.add(fhash)
-
-        try:
-            text = extract_text(pdf_path)
-            stmt = parse_statement(text, str(pdf_path))
-            if stmt.transactions:
-                warnings = validate_statement(stmt)
-                if warnings:
-                    for w in warnings:
-                        logger.warning("%s: %s", pdf_path.name, w)
-                statements.append(stmt)
-            else:
-                logger.warning("No transactions parsed from: %s", pdf_path)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, UnicodeError, ValueError) as exc:
-            logger.error("Failed to parse %s: %s", pdf_path, exc)
-            continue
+    load_result = load_statements(pdf_files)
+    statements = load_result.statements
+    for warning in load_result.warnings:
+        logger.warning("%s", warning)
+    for error in load_result.errors:
+        logger.error("%s", error)
 
     if not statements:
         logger.error("No valid statements found.")
@@ -287,26 +261,30 @@ Examples:
     if args.export_category_template:
         category_template_path = out_dir / f"{base}_category_template.csv"
 
-    build_report(
-        statements=statements,
-        config=config,
-        output_path=output_path,
-        mode=mode,
-        target_month=args.month,
-        target_year=target_year,
-        target_quarter=args.quarter,
-        start_date_str=args.start_date,
-        end_date_str=args.end_date,
-        audit_path=audit_path,
-        pl_csv_path=pl_csv_path,
-        cpa_export_dir=cpa_export_dir,
-        category_template_path=category_template_path,
-        mask_personal=args.mask,
-        allow_mismatch=args.allow_mismatch,
-        scenario=args.scenario,
-        strict=args.strict,
-        full_detail=args.full_detail,
-        do_projections=args.projections,
-        allow_review_items=args.allow_review_items,
-        overwrite=args.overwrite,
-    )
+    try:
+        build_report(
+            statements=statements,
+            config=config,
+            output_path=output_path,
+            mode=mode,
+            target_month=args.month,
+            target_year=target_year,
+            target_quarter=args.quarter,
+            start_date_str=args.start_date,
+            end_date_str=args.end_date,
+            audit_path=audit_path,
+            pl_csv_path=pl_csv_path,
+            cpa_export_dir=cpa_export_dir,
+            category_template_path=category_template_path,
+            mask_personal=args.mask,
+            allow_mismatch=args.allow_mismatch,
+            scenario=args.scenario,
+            strict=args.strict,
+            full_detail=args.full_detail,
+            do_projections=args.projections,
+            allow_review_items=args.allow_review_items,
+            overwrite=args.overwrite,
+        )
+    except LedgerSightError as exc:
+        logger.error("%s", exc)
+        sys.exit(1)

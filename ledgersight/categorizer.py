@@ -64,7 +64,8 @@ _EXPENSE_CATEGORIES: dict[str, list[str]] = {
         r"\bMATERIALS\b", r"\bSUPPLIES\b",
     ],
     "Equipment Rental": [
-        r"\bRENTAL\b", r"\bLEASE\b", r"\bEQUIPMENT\s+RENTAL\b",
+        r"\bEQUIPMENT\s+RENTAL\b", r"\bTRAILER\s+RENTAL\b",
+        r"\bRENTAL\s+EQUIPMENT\b",
     ],
     "Tolls and Scale Fees": [
         r"\bTOLL\b", r"\bSCALE\s+FEE\b", r"\bWEIGH\s+STATION\b",
@@ -98,7 +99,9 @@ _EXPENSE_CATEGORIES: dict[str, list[str]] = {
         r"\bBENEFITS\b",
     ],
     "Equipment Maintenance": [
-        r"\bPARTS\b", r"\bREPAIR\b", r"\bMAINTENANCE\b",
+        r"\bPARTS\b",
+        r"\bREPAIR\s+SHOP", r"\bTRUCK\s+REPAIR",
+        r"\bMAINTENANCE\s+SHOP", r"\bTIRE\s+SERVICE",
         r"O'REILLY\s+AUTO", r"\bAUTO\s+ZONE\b",
     ],
     "Legal and Professional Fees": [
@@ -128,10 +131,12 @@ _EXPENSE_CATEGORIES: dict[str, list[str]] = {
         r"\bPAYROLL\s+TAX\b",
     ],
     "Rent or Lease": [
-        r"\bRENT\b", r"\bLEASE\s+PAYMENT\b",
+        r"\bOFFICE\s+RENT\b", r"\bPROPERTY\s+LEASE\b",
+        r"\bRENT\s+PAYMENT\b",
     ],
     "Repairs and Maintenance": [
         r"\bREPAIR\b", r"\bMAINTENANCE\b",
+        r"\bGENERAL\s+REPAIR\b",
     ],
     "Software and Cloud Services": [
         r"GOOGLE\s+LLC\s+GSUIT", r"\bGSUITE\b",
@@ -240,7 +245,10 @@ def build_default_rules() -> list[CategoryRule]:
                 rule.include_in_pnl = False
             elif cat == "Tax Payment":
                 rule.include_in_pnl = False
-            elif cat in ("Refund", "Reimbursement", "Opening Balance", "Uncategorized", "CPA Review Required"):
+            elif cat in ("Refund", "Reimbursement"):
+                rule.include_in_pnl = False
+                rule.direction = "debit"
+            elif cat in ("Opening Balance", "Uncategorized", "CPA Review Required"):
                 rule.include_in_pnl = False
             rules.append(rule)
 
@@ -323,10 +331,10 @@ class TransactionCategorizer:
         self._build_combined_rules()
 
     def _build_combined_rules(self):
-        """Merge custom and default rules, custom taking priority."""
-        all_rules = list(self.custom_rules) + self.default_rules
-        all_rules.sort(key=lambda r: r.priority)
-        self._rules = all_rules
+        self._rules = [
+            *sorted(self.custom_rules, key=lambda r: r.priority),
+            *sorted(self.default_rules, key=lambda r: r.priority),
+        ]
 
     def categorize(self, transaction: Transaction) -> Transaction:
         """Apply rules to categorize a single transaction. First match wins.

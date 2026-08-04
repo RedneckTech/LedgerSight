@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import re
-import sys
 import tomllib
 from decimal import Decimal
 from pathlib import Path
@@ -13,6 +12,7 @@ from ledgersight.constants import (
     VALID_DEDUCTIBILITY,
     VALID_ENTITY_TYPES,
 )
+from ledgersight.exceptions import ConfigurationError
 from ledgersight.models import BusinessConfig, CategoryRule
 
 logger = logging.getLogger("ledgersight.config")
@@ -291,10 +291,11 @@ health_insurance_docs = "not-provided"
 # =============================================================================
 
 
-def load_config(config_path: Path, was_explicit: bool = False) -> BusinessConfig:
+def load_config(config_path: Path, was_explicit: bool = False, strict: bool = True) -> BusinessConfig:
     """Load business configuration from a TOML file.
 
     If *was_explicit* is True (user supplied --config), a missing file is fatal.
+    When *strict* is True (default), fatal validation errors raise ConfigurationError.
     Otherwise silently returns defaults.
     """
     config = BusinessConfig()
@@ -355,7 +356,9 @@ def load_config(config_path: Path, was_explicit: bool = False) -> BusinessConfig
                     "Invalid regex pattern in custom rule '%s': %s",
                     rule_data.get("category", "?"), exc,
                 )
-                sys.exit(1)
+                raise ConfigurationError(
+                    f"Invalid regex pattern in custom rule '{rule_data.get('category', '?')}': {exc}",
+                ) from exc
 
             config.custom_rules.append(CategoryRule(
                 pattern=rule_data.get("pattern", ""),
@@ -393,14 +396,23 @@ def load_config(config_path: Path, was_explicit: bool = False) -> BusinessConfig
             "Configuration file not found: %s (use --init-config to create one)",
             config_path.resolve(),
         )
-        sys.exit(1)
+        raise ConfigurationError(
+            f"Configuration file not found: {config_path.resolve()}",
+        )
 
     errors, warnings = validate_config(config)
     for err in errors:
         logger.error("Config validation error: %s", err)
     for warn in warnings:
         logger.warning("Config validation warning: %s", warn)
-    if errors:
+    if errors and strict:
+        raise ConfigurationError(
+            "Configuration has {} fatal error(s):\n{}".format(
+                len(errors),
+                "\n".join(f"  - {e}" for e in errors),
+            ),
+        )
+    elif errors:
         logger.error(
             "Configuration has %d fatal error(s). Report generation may be unreliable.",
             len(errors),

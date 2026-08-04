@@ -111,7 +111,9 @@ class ConfigEditorScreen(Screen[None]):
             self.query_one("#phone", Input).value = config.phone
             self.query_one("#email", Input).value = config.email
             self.query_one("#industry", Input).value = config.industry
+            self.query_one("#entity_type", Select).value = config.entity_type
             self.query_one("#tax_year", Input).value = str(config.tax_year)
+            self.query_one("#fiscal_year_start", Select).value = config.fiscal_year_start
             self.query_one("#cpa_name", Input).value = config.cpa_name
             self.query_one("#cpa_firm", Input).value = config.cpa_firm
             self.query_one("#cpa_email", Input).value = config.cpa_email
@@ -121,26 +123,40 @@ class ConfigEditorScreen(Screen[None]):
     async def _save_continue(self) -> None:
         app = self.app
         if isinstance(app, LedgerSightApp):
+            from dataclasses import replace
+            from pathlib import Path
+
+            from ledgersight.config import validate_config
+            from ledgersight.constants import _DEFAULT_CONFIG
             from ledgersight.models import BusinessConfig
 
-            config = BusinessConfig(
+            config = app.state.config or BusinessConfig()
+            config = replace(
+                config,
                 business_name=self.query_one("#business_name", Input).value,
                 dba=self.query_one("#dba", Input).value,
                 address=self.query_one("#address", Input).value,
                 phone=self.query_one("#phone", Input).value,
                 email=self.query_one("#email", Input).value,
                 industry=self.query_one("#industry", Input).value,
-                entity_type=self.query_one("#entity_type", Select).value or "sole-prop",
-                tax_year=int(self.query_one("#tax_year", Input).value or "2025"),
+                entity_type=self.query_one("#entity_type", Select).value or config.entity_type,
+                tax_year=int(self.query_one("#tax_year", Input).value or config.tax_year),
+                fiscal_year_start=int(
+                    self.query_one("#fiscal_year_start", Select).value
+                    or config.fiscal_year_start
+                ),
                 cpa_name=self.query_one("#cpa_name", Input).value,
                 cpa_firm=self.query_one("#cpa_firm", Input).value,
                 cpa_email=self.query_one("#cpa_email", Input).value,
                 cpa_phone=self.query_one("#cpa_phone", Input).value,
             )
-            app.state.config = config
-            from pathlib import Path
 
-            from ledgersight.constants import _DEFAULT_CONFIG
+            errors, warnings = validate_config(config)
+            if errors:
+                self.notify(f"Config error: {errors[0]}", severity="error")
+                return
+
+            app.state.config = config
             app.state.config_path = Path(_DEFAULT_CONFIG)
             await app.goto_screen("statements")
 

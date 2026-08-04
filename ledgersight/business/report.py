@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import sys
+import shutil
+import tempfile
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -27,6 +28,11 @@ from ledgersight.charts import (
     chart_top_vendors,
 )
 from ledgersight.constants import _CPA_DISCLAIMER, _PNL_DISCLAIMER
+from ledgersight.exceptions import (
+    NoStatementsError,
+    ReconciliationError,
+    ReportGenerationError,
+)
 from ledgersight.exports import CSVExporter, get_fixed_asset_candidates
 from ledgersight.models import BusinessConfig, ReconciliationResult, Statement
 from ledgersight.parsers import (
@@ -1965,7 +1971,7 @@ def build_report(
 
     if not statements:
         logger.error("No statements found matching filters.")
-        sys.exit(1)
+        raise NoStatementsError("No statements found matching filters.")
 
     statements.sort(key=lambda s: (s.year, s.month))
 
@@ -2029,7 +2035,9 @@ def build_report(
                 start_date_str or "the beginning",
                 end_date_str or "the end",
             )
-            sys.exit(1)
+            raise NoStatementsError(
+                f"No transactions found between {start_date_str or 'the beginning'} and {end_date_str or 'the end'}."
+            )
         report_statements = filtered_stmts
 
     categorizer = TransactionCategorizer(config.custom_rules, config.merchant_aliases)
@@ -2053,7 +2061,9 @@ def build_report(
             if not rr.passed:
                 for w in rr.warnings:
                     logger.error("  %s: %s", rr.statement_label, w)
-        sys.exit(1)
+        raise ReconciliationError(
+            "Reconciliation failed. Use --allow-mismatch to force report generation."
+        )
 
     pl = build_pl(
         [tx for s in report_statements for tx in s.transactions],
@@ -2116,7 +2126,10 @@ def build_report(
                 "Use --allow-review-items to generate a preliminary report.",
                 review_count,
             )
-            sys.exit(1)
+            raise ReportGenerationError(
+                f"Strict mode: {review_count} transactions require CPA review. "
+                "Use --allow-review-items to generate a preliminary report."
+            )
 
     if start_date_str or end_date_str:
         logger.warning(
@@ -2158,7 +2171,9 @@ def build_report(
             "Output file(s) already exist. Use --overwrite to replace:\n  %s",
             paths_str,
         )
-        sys.exit(1)
+        raise ReportGenerationError(
+            f"Output file(s) already exist. Use --overwrite to replace:\n  {paths_str}"
+        )
 
     redact_names = [
         value
@@ -2202,23 +2217,52 @@ def build_report(
         redactor=redactor,
     )
 
-    if mode == "cpa":
-        pdf = ReportPDF(f"CPA Package - {config.display_name()}")
-        builder._cpa_package(pdf)
-        pdf.output(str(output_path))
-    else:
-        pdf = builder.build()
-        pdf.output(str(output_path))
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+
+        tmp_output = tmpdir_path / output_path.name
+
+        if mode == "cpa":
+            pdf = ReportPDF(f"CPA Package - {config.display_name()}")
+            builder._cpa_package(pdf)
+            pdf.output(str(tmp_output))
+        else:
+            pdf = builder.build()
+            pdf.output(str(tmp_output))
+
+        exporter = CSVExporter(report_statements, config, pl, projections,
+                               recon_results=recon_results, redactor=redactor)
+
+        tmp_audit = tmpdir_path / audit_path.name if audit_path else None
+        tmp_pl_csv = tmpdir_path / pl_csv_path.name if pl_csv_path else None
+        tmp_cpa_dir = tmpdir_path / "cpa" if cpa_export_dir else None
+        tmp_category = tmpdir_path / category_template_path.name if category_template_path else None
+
+        if tmp_cpa_dir:
+            tmp_cpa_dir.mkdir()
+
+        if audit_path:
+            exporter.export_audit(tmp_audit)
+        if pl_csv_path:
+            exporter.export_pl(tmp_pl_csv)
+        if cpa_export_dir:
+            exporter.export_cpa(tmp_cpa_dir)
+        if category_template_path:
+            exporter.export_category_template(tmp_category)
+
+        shutil.move(str(tmp_output), str(output_path))
+        if audit_path:
+            shutil.move(str(tmp_audit), str(audit_path))
+        if pl_csv_path:
+            shutil.move(str(tmp_pl_csv), str(pl_csv_path))
+        if cpa_export_dir:
+            for f in tmp_cpa_dir.iterdir():
+                dest = cpa_export_dir / f.name
+                if dest.exists():
+                    dest.unlink()
+                shutil.move(str(f), str(dest))
+            tmp_cpa_dir.rmdir()
+        if category_template_path:
+            shutil.move(str(tmp_category), str(category_template_path))
 
     logger.info("Report saved to: %s", output_path)
-
-    exporter = CSVExporter(report_statements, config, pl, projections,
-                           recon_results=recon_results, redactor=redactor)
-    if audit_path:
-        exporter.export_audit(audit_path)
-    if pl_csv_path:
-        exporter.export_pl(pl_csv_path)
-    if cpa_export_dir:
-        exporter.export_cpa(cpa_export_dir)
-    if category_template_path:
-        exporter.export_category_template(category_template_path)

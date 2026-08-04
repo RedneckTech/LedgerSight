@@ -5,12 +5,12 @@ import hashlib
 import logging
 import re
 import subprocess
-import sys
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
 from ledgersight.constants import _ACTIVITY_SECTION_ENDINGS, MONEY_RE, RC_TOLERANCE
+from ledgersight.exceptions import LedgerSightError
 from ledgersight.models import Statement, Transaction
 
 logger = logging.getLogger("ledgersight.parsers")
@@ -113,10 +113,14 @@ def check_pdftotext() -> None:
             "  macOS: brew install poppler\n"
             "  Windows: https://github.com/oschwartz10612/poppler-windows/releases"
         )
-        sys.exit(1)
+        raise LedgerSightError(
+            "pdftotext not found. Install poppler-utils."
+        ) from None
     except Exception as exc:
         logger.error(f"Cannot run pdftotext: {exc}")
-        sys.exit(1)
+        raise LedgerSightError(
+            f"Cannot run pdftotext: {exc}"
+        ) from exc
 
 
 def extract_text(pdf_path: Path) -> str:
