@@ -84,16 +84,41 @@ class WelcomeScreen(Screen[None]):
         else:
             recent_list.append(ListItem(Static("  No recent configs")))
 
+    @on(ListView.Selected, "#recent-list")
+    async def _on_recent_selected(self, event: ListView.Selected) -> None:
+        await self._load_from_recent()
+
     @on(Button.Pressed, "#btn-open")
     async def _open_config(self) -> None:
-        app = self.app
-        if isinstance(app, LedgerSightApp):
-            from ledgersight.config import _DEFAULT_CONFIG, load_config
+        await self._load_from_recent()
 
-            config = load_config(Path(_DEFAULT_CONFIG))
-            app.state.config = config
-            app.state.config_path = Path(_DEFAULT_CONFIG)
-            await app.goto_screen("statements")
+    async def _load_from_recent(self) -> None:
+        app = self.app
+        if not isinstance(app, LedgerSightApp):
+            return
+
+        from ledgersight.config import load_config
+
+        recent_list = self.query_one("#recent-list", ListView)
+        if recent_list.index is not None and recent_list.index < len(recent_list.children):
+            recents = _load_recents()
+            if recent_list.index < len(recents):
+                config_path = recents[recent_list.index]
+                if config_path.exists():
+                    config = load_config(config_path)
+                    app.state.config = config
+                    app.state.config_path = config_path
+                    _save_recent(config_path)
+                    await app.goto_screen("statements")
+                    return
+
+        from ledgersight.constants import _DEFAULT_CONFIG
+
+        default_path = Path(_DEFAULT_CONFIG)
+        config = load_config(default_path)
+        app.state.config = config
+        app.state.config_path = default_path
+        await app.goto_screen("statements")
 
     @on(Button.Pressed, "#btn-new")
     async def _new_config(self) -> None:

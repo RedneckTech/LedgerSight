@@ -40,6 +40,7 @@ class TxnBrowserScreen(Screen[None]):
     def on_mount(self) -> None:
         table = self.query_one("#txn-table", DataTable)
         table.add_columns("Date", "Description", "Category", "Amount", "Type", "In P&L?")
+        self._populate_transactions()
 
     def _populate_transactions(self, filter_text: str = "") -> None:
         app = self.app

@@ -11,6 +11,7 @@ from textual.containers import Horizontal
 from textual.screen import Screen
 from textual.widgets import Button, Label, ProgressBar, RichLog, Static
 
+from ledgersight.exceptions import LedgerSightError
 from ledgersight.tui.app import LedgerSightApp
 
 
@@ -122,7 +123,7 @@ class GenerateScreen(Screen[None]):
 
             if output_path.exists():
                 self.notify(
-                    f"Will overwrite: {output_path.name}",
+                    f"Overwriting existing report: {output_path.name}",
                     severity="warning",
                     timeout=5,
                 )
@@ -137,7 +138,7 @@ class GenerateScreen(Screen[None]):
                 period_info += f", quarter=FQ{app.state.report_quarter}"
             log.write(f"[bold]Generating report: {period_info}[/bold]")
 
-            await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 build_report,
                 statements=statements,
                 config=config,
@@ -155,16 +156,25 @@ class GenerateScreen(Screen[None]):
                 allow_mismatch=False,
                 strict=False,
                 full_detail=True,
-                overwrite=False,
+                overwrite=True,
             )
+
+            if result:
+                app.state.pl = result.pl
+                app.state.monthly_pls = result.monthly_pls
+                app.state.quarterly_pls = result.quarterly_pls
+                app.state.projections = result.projections or []
 
             progress.update(progress=100)
             log.write("")
             log.write(f"[bold green]Report saved to: {output_path}[/bold green]")
             status_label.update(f"Complete — {output_path}")
 
-        except BaseException as exc:
-            log.write(f"[red]Error: {exc}[/red]")
+        except LedgerSightError as exc:
+            log.write(f"[red]{exc}[/red]")
+            status_label.update(f"Error: {exc}")
+        except Exception as exc:
+            log.write(f"[red]Unexpected error: {exc}[/red]")
             status_label.update(f"Error: {exc}")
         finally:
             self.query_one("#btn-generate", Button).disabled = False

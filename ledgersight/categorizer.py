@@ -228,23 +228,36 @@ def build_default_rules() -> list[CategoryRule]:
             elif cat == "Credit Card Payment":
                 rule.is_transfer = True
                 rule.include_in_pnl = False
-            elif cat == "Loan Proceeds" or cat == "Loan Principal Payment":
+                rule.direction = "debit"
+            elif cat == "Loan Proceeds":
                 rule.is_loan = True
                 rule.include_in_pnl = False
+                rule.direction = "credit"
+            elif cat == "Loan Principal Payment":
+                rule.is_loan = True
+                rule.include_in_pnl = False
+                rule.direction = "debit"
             elif cat == "Payment Reversal":
                 rule.include_in_pnl = False
-                rule.direction = "credit"
+                rule.direction = "debit"
             elif cat == "Loan Interest":
                 rule.is_loan = True
                 rule.include_in_pnl = True
-            elif cat == "Owner Contribution" or cat == "Owner Draw or Distribution":
+            elif cat == "Owner Contribution":
                 rule.is_owner_related = True
                 rule.include_in_pnl = False
+                rule.direction = "credit"
+            elif cat == "Owner Draw or Distribution":
+                rule.is_owner_related = True
+                rule.include_in_pnl = False
+                rule.direction = "debit"
             elif cat == "Fixed Asset Purchase":
                 rule.is_fixed_asset = True
                 rule.include_in_pnl = False
+                rule.direction = "debit"
             elif cat == "Tax Payment":
                 rule.include_in_pnl = False
+                rule.direction = "debit"
             elif cat in ("Refund", "Reimbursement"):
                 rule.include_in_pnl = False
                 rule.direction = "debit"

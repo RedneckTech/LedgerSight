@@ -36,6 +36,7 @@ class CategoriesScreen(Screen[None]):
     def on_mount(self) -> None:
         table = self.query_one("#rule-table", DataTable)
         table.add_columns("Priority", "Pattern", "Category", "Tax Category", "Direction")
+        self._populate_rules()
 
     def _populate_rules(self) -> None:
         app = self.app
