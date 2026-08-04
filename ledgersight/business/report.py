@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import shutil
-import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -533,7 +533,8 @@ class ReportBuilder:
             ("Owner Distributions / Draws", fmt_dollar(pl.owner_distributions)),
             ("Loan Proceeds", fmt_dollar(pl.loan_proceeds)),
             ("Loan Principal Payments", fmt_dollar(pl.loan_principal_payments)),
-            ("Payment Reversals (NSF Returns)", fmt_dollar(pl.payment_reversals)),
+            ("Payment Reversal Credits (NSF Returns)", fmt_dollar(pl.payment_reversal_credits)),
+            ("Payment Reversal Debits", fmt_dollar(pl.payment_reversal_debits)),
             ("Fixed Asset Purchases", fmt_dollar(pl.fixed_asset_purchases)),
             ("Account Transfers (credits)", fmt_dollar(pl.account_transfers_credits)),
             ("Account Transfers (debits)", fmt_dollar(pl.account_transfers_debits)),
@@ -738,8 +739,10 @@ class ReportBuilder:
                 non_pl_items.append(("Loan Proceeds", fmt_dollar(pl.loan_proceeds)))
             if pl.loan_principal_payments:
                 non_pl_items.append(("Loan Principal Payments", fmt_dollar(pl.loan_principal_payments)))
-            if pl.payment_reversals:
-                non_pl_items.append(("Payment Reversals", fmt_dollar(pl.payment_reversals)))
+            if pl.payment_reversal_credits:
+                non_pl_items.append(("Payment Reversal Credits", fmt_dollar(pl.payment_reversal_credits)))
+            if pl.payment_reversal_debits:
+                non_pl_items.append(("Payment Reversal Debits", fmt_dollar(pl.payment_reversal_debits)))
             if pl.fixed_asset_purchases:
                 non_pl_items.append(("Fixed Asset Purchases", fmt_dollar(pl.fixed_asset_purchases)))
             if pl.account_transfers_credits:
@@ -1256,7 +1259,8 @@ class ReportBuilder:
             ("Account Transfers (net credits)", fmt_dollar(pl.account_transfers_credits)),
             ("Account Transfers (net debits)", fmt_dollar(pl.account_transfers_debits)),
             ("Credit Card Transfers", fmt_dollar(pl.credit_card_transfers)),
-            ("Payment Reversals (NSF Returns)", fmt_dollar(pl.payment_reversals)),
+            ("Payment Reversal Credits (NSF Returns)", fmt_dollar(pl.payment_reversal_credits)),
+            ("Payment Reversal Debits", fmt_dollar(pl.payment_reversal_debits)),
             ("", ""),
             ("Reconciliation Items:", ""),
             ("Unclassified Credits (excluded from P&L)", fmt_dollar(pl.uncategorized_non_pnl_credits)),
@@ -1278,7 +1282,8 @@ class ReportBuilder:
         )
         bridge_rows: list[tuple[str, str]] = [
             ("Preliminary Net Profit/Loss", fmt_dollar(pl.net_profit)),
-            ("+ Payment Reversals (NSF Returns)", fmt_dollar(pl.payment_reversals)),
+            ("+ Payment Reversal Credits (NSF Returns)", fmt_dollar(pl.payment_reversal_credits)),
+            ("- Payment Reversal Debits", fmt_dollar(-pl.payment_reversal_debits)),
             ("+ Loan Proceeds", fmt_dollar(pl.loan_proceeds)),
             ("- Loan Principal Payments", fmt_dollar(-pl.loan_principal_payments)),
             ("+ Owner Contributions", fmt_dollar(pl.owner_contributions)),
@@ -1290,7 +1295,7 @@ class ReportBuilder:
              fmt_dollar(pl.uncategorized_non_pnl_credits - pl.uncategorized_non_pnl_debits)),
             ("", ""),
             ("= Estimated Net Cash Change",
-             fmt_dollar(pl.net_profit + pl.payment_reversals + pl.loan_proceeds
+             fmt_dollar(pl.net_profit + pl.payment_reversal_credits - pl.payment_reversal_debits + pl.loan_proceeds
                         - pl.loan_principal_payments + pl.owner_contributions
                         - pl.owner_distributions - pl.fixed_asset_purchases
                         + pl.account_transfers_credits - pl.account_transfers_debits
@@ -1419,7 +1424,7 @@ class ReportBuilder:
         for tx in candidates[:100]:
             rows.append([
                 tx.post_date,
-                normalize_merchant(tx.description)[:25],
+                self.redactor.merchant(normalize_merchant(tx.description))[:25],
                 self._mask_text(tx.description)[:35],
                 tx.business_category[:18],
                 tx.tax_category[:18],
@@ -1457,7 +1462,7 @@ class ReportBuilder:
             for tx in likely[:30]:
                 lik_rows.append([
                     tx.post_date,
-                    normalize_merchant(tx.description)[:25],
+                    self.redactor.merchant(normalize_merchant(tx.description))[:25],
                     self._mask_text(tx.description)[:35],
                     fmt_dollar(tx.amount),
                     "Review needed",
@@ -1498,7 +1503,7 @@ class ReportBuilder:
                 note = "CPA review" if tx.amount >= Decimal("2500") else "Review"
                 oth_rows.append([
                     tx.post_date,
-                    normalize_merchant(tx.description)[:25],
+                    self.redactor.merchant(normalize_merchant(tx.description))[:25],
                     self._mask_text(tx.description)[:35],
                     fmt_dollar(tx.amount),
                     reason,
@@ -2236,73 +2241,96 @@ def build_report(
     if cpa_export_dir:
         cpa_export_dir.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
+    staging_dir = output_path.parent / f".{output_path.stem}.staging"
+    staging_dir.mkdir(parents=True, exist_ok=True)
 
-        tmp_output = tmpdir_path / output_path.name
+    backup_dir = output_path.parent / f".{output_path.stem}.backup"
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        staging_pdf = staging_dir / output_path.name
 
         if mode == "cpa":
             safe_name = redactor.person(config.display_name()) if redactor.mask_personal else config.display_name()
             pdf = ReportPDF(f"CPA Package - {safe_name}")
             builder._cpa_package(pdf)
-            pdf.output(str(tmp_output))
+            pdf.output(str(staging_pdf))
         else:
             pdf = builder.build()
-            pdf.output(str(tmp_output))
+            pdf.output(str(staging_pdf))
 
         exporter = CSVExporter(report_statements, config, pl, projections,
                                recon_results=recon_results, redactor=redactor)
 
-        tmp_audit = tmpdir_path / audit_path.name if audit_path else None
-        tmp_pl_csv = tmpdir_path / pl_csv_path.name if pl_csv_path else None
-        tmp_cpa_dir = tmpdir_path / "cpa" if cpa_export_dir else None
-        tmp_category = tmpdir_path / category_template_path.name if category_template_path else None
+        staging_audit = staging_dir / audit_path.name if audit_path else None
+        staging_pl_csv = staging_dir / pl_csv_path.name if pl_csv_path else None
+        staging_cpa_dir = staging_dir / "cpa" if cpa_export_dir else None
+        staging_category = staging_dir / category_template_path.name if category_template_path else None
 
-        if tmp_cpa_dir:
-            tmp_cpa_dir.mkdir()
+        if staging_cpa_dir:
+            staging_cpa_dir.mkdir()
 
         if audit_path:
-            exporter.export_audit(tmp_audit)
+            exporter.export_audit(staging_audit)
         if pl_csv_path:
-            exporter.export_pl(tmp_pl_csv)
+            exporter.export_pl(staging_pl_csv)
         if cpa_export_dir:
-            exporter.export_cpa(tmp_cpa_dir)
+            exporter.export_cpa(staging_cpa_dir)
         if category_template_path:
-            exporter.export_category_template(tmp_category)
+            exporter.export_category_template(staging_category)
 
-        moves: list[tuple[Path, Path]] = []
-        moves.append((tmp_output, output_path))
+        # Backup existing outputs
+        if output_path.exists():
+            shutil.move(str(output_path), str(backup_dir / output_path.name))
+        if audit_path and audit_path.exists():
+            shutil.move(str(audit_path), str(backup_dir / audit_path.name))
+        if pl_csv_path and pl_csv_path.exists():
+            shutil.move(str(pl_csv_path), str(backup_dir / pl_csv_path.name))
+        if cpa_export_dir and cpa_export_dir.exists():
+            shutil.move(str(cpa_export_dir), str(backup_dir / "cpa"))
+        if category_template_path and category_template_path.exists():
+            shutil.move(str(category_template_path), str(backup_dir / category_template_path.name))
+
+        # Publish from staging to final destinations atomically
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(str(staging_pdf), str(output_path))
+
         if audit_path:
-            moves.append((tmp_audit, audit_path))
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(str(staging_audit), str(audit_path))
         if pl_csv_path:
-            moves.append((tmp_pl_csv, pl_csv_path))
+            pl_csv_path.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(str(staging_pl_csv), str(pl_csv_path))
         if cpa_export_dir:
-            for f in sorted(tmp_cpa_dir.iterdir()):
+            cpa_export_dir.mkdir(parents=True, exist_ok=True)
+            for f in sorted(staging_cpa_dir.iterdir()):
                 dest = cpa_export_dir / f.name
                 if dest.exists():
                     dest.unlink()
-                moves.append((f, dest))
+                os.replace(str(f), str(dest))
         if category_template_path:
-            moves.append((tmp_category, category_template_path))
+            category_template_path.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(str(staging_category), str(category_template_path))
 
-        completed: list[tuple[Path, Path]] = []
-        try:
-            for src, dst in moves:
-                shutil.move(str(src), str(dst))
-                completed.append((src, dst))
-        except Exception:
-            for rev_src, rev_dst in completed:
-                try:
-                    shutil.move(str(rev_dst), str(rev_src))
-                except Exception:
-                    logger.warning("Failed to roll back move: %s -> %s", rev_dst, rev_src)
-            raise
-
-        if tmp_cpa_dir:
-            try:
-                tmp_cpa_dir.rmdir()
-            except OSError:
-                pass
+        shutil.rmtree(backup_dir)
+    except Exception:
+        # Restore from backup on publication failure
+        if backup_dir.exists():
+            for item in backup_dir.iterdir():
+                dest = output_path.parent / item.name
+                if item.is_file():
+                    if dest.exists():
+                        dest.unlink()
+                    shutil.move(str(item), str(dest))
+                else:
+                    if dest.exists():
+                        shutil.rmtree(dest)
+                    shutil.move(str(item), str(dest))
+        raise
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
     logger.info("Report saved to: %s", output_path)
     return ReportBuildResult(

@@ -2,13 +2,84 @@
 
 from __future__ import annotations
 
+import os
+import re
+from pathlib import Path
+
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Input, Label, Select, Static
 
+from ledgersight.models import BusinessConfig
 from ledgersight.tui.app import LedgerSightApp
+
+
+def _save_config_to_toml(config: BusinessConfig, path: Path) -> None:
+    """Write BusinessConfig to a TOML file, preserving existing sections."""
+    general = _build_general_section(config)
+    cpa = _build_cpa_section(config)
+    tail = _extract_tail(path)
+
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(general + "\n" + cpa + tail + "\n")
+    os.replace(str(tmp), str(path))
+
+
+def _build_general_section(config: BusinessConfig) -> str:
+    parts = [
+        "[general]",
+        f'business_name = "{config.business_name}"',
+    ]
+    for field, key in (
+        ("dba", config.dba),
+        ("address", config.address),
+        ("phone", config.phone),
+        ("email", config.email),
+    ):
+        if key:
+            parts.append(f'{field} = "{key}"')
+    parts.append(f"tax_year = {config.tax_year}")
+    parts.append(f"fiscal_year_start = {config.fiscal_year_start}")
+    parts.append(f'entity_type = "{config.entity_type}"')
+    parts.append(f'accounting_method = "{config.accounting_method}"')
+    if config.ein_display:
+        parts.append(f'ein_display = "{config.ein_display}"')
+    parts.append(f"mask_ein = {str(config.mask_ein).lower()}")
+    if config.bank_account_display:
+        parts.append(f'bank_account_display = "{config.bank_account_display}"')
+    parts.append(f"mask_account = {str(config.mask_account).lower()}")
+    if config.industry:
+        parts.append(f'industry = "{config.industry}"')
+    parts.append(f'currency = "{config.currency}"')
+    return "\n".join(parts)
+
+
+def _build_cpa_section(config: BusinessConfig) -> str:
+    parts = [
+        "[cpa]",
+        f'name = "{config.cpa_name}"',
+    ]
+    for field, key in (
+        ("firm", config.cpa_firm),
+        ("email", config.cpa_email),
+        ("phone", config.cpa_phone),
+    ):
+        if key:
+            parts.append(f'{field} = "{key}"')
+    return "\n".join(parts)
+
+
+def _extract_tail(path: Path) -> str:
+    """Extract everything after [cpa] section from existing TOML."""
+    if not path.exists():
+        return ""
+    raw = path.read_text()
+    match = re.search(r"\n\[cpa\].*?(?=\n\[)", raw, re.DOTALL)
+    if not match:
+        return ""
+    return "\n" + raw[match.end():]
 
 
 class ConfigEditorScreen(Screen[None]):
@@ -158,7 +229,7 @@ class ConfigEditorScreen(Screen[None]):
                 cpa_phone=self.query_one("#cpa_phone", Input).value,
             )
 
-            errors, warnings = validate_config(config)
+            errors, _warnings = validate_config(config)
             if errors:
                 self.notify(f"Config error: {errors[0]}", severity="error")
                 return
@@ -166,10 +237,14 @@ class ConfigEditorScreen(Screen[None]):
             from ledgersight.tui.screens.welcome import _save_recent
 
             app.state.config = config
-            if app.state.config_path:
-                app.state.config_path = app.state.config_path
-            else:
+            if not app.state.config_path:
                 app.state.config_path = Path(_DEFAULT_CONFIG)
+
+            try:
+                _save_config_to_toml(config, app.state.config_path)
+            except OSError as exc:
+                self.notify(f"Could not save config: {exc}", severity="error")
+
             _save_recent(app.state.config_path)
             await app.goto_screen("statements")
 

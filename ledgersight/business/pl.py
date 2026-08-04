@@ -54,7 +54,8 @@ class ProfitAndLoss:
         self.owner_distributions: Decimal = Decimal("0")
         self.loan_proceeds: Decimal = Decimal("0")
         self.loan_principal_payments: Decimal = Decimal("0")
-        self.payment_reversals: Decimal = Decimal("0")
+        self.payment_reversal_credits: Decimal = Decimal("0")
+        self.payment_reversal_debits: Decimal = Decimal("0")
         self.fixed_asset_purchases: Decimal = Decimal("0")
         self.account_transfers_credits: Decimal = Decimal("0")
         self.account_transfers_debits: Decimal = Decimal("0")
@@ -65,14 +66,15 @@ class ProfitAndLoss:
     @property
     def non_pnl_credits(self) -> Decimal:
         return (self.owner_contributions + self.loan_proceeds
-                + self.payment_reversals
+                + self.payment_reversal_credits
                 + self.account_transfers_credits + self.uncategorized_non_pnl_credits)
 
     @property
     def non_pnl_debits(self) -> Decimal:
         return (self.owner_distributions + self.loan_principal_payments
                 + self.fixed_asset_purchases + self.account_transfers_debits
-                + self.credit_card_transfers + self.uncategorized_non_pnl_debits)
+                + self.credit_card_transfers + self.uncategorized_non_pnl_debits
+                + self.payment_reversal_debits)
 
     @property
     def total_revenue(self) -> Decimal:
@@ -204,14 +206,14 @@ def build_pl(
                 elif orig_cat in _INCOME_CAT_SET:
                     pl.revenue[orig_cat] -= apply_amount
                 else:
-                    pl.payment_reversals += apply_amount
+                    pl.payment_reversal_credits += apply_amount
                 if remainder > 0:
-                    pl.payment_reversals += remainder
+                    pl.payment_reversal_credits += remainder
             else:
-                pl.payment_reversals += tx.amount
+                pl.payment_reversal_credits += tx.amount
             continue
         elif cat == "Payment Reversal":
-            pl.payment_reversals += tx.amount
+            pl.payment_reversal_debits += tx.amount
             continue
 
         # ---- Fixed assets ----
