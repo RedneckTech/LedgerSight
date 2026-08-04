@@ -31,6 +31,12 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from fpdf import FPDF
 
+from ledgersight.categorizer import normalize_merchant
+from ledgersight.parsers import _clean_description, fmt_dollar, parse_amount
+from ledgersight.parsers import extract_text as _extract_text_path
+from ledgersight.parsers import find_pdfs as _find_pdfs_path
+from ledgersight.pdf_renderer import ReportPDF
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT_HASH = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:8]
 
@@ -246,25 +252,8 @@ class Statement:
 # ---------------------------------------------------------------------------
 
 
-def parse_amount(text: str) -> Decimal:
-    t = text.strip().replace("$", "").replace(",", "")
-    if t.startswith("-"):
-        return Decimal(t)
-    return Decimal(t)
-
-
-def fmt_dollar(val: Decimal) -> str:
-    sign = "-" if val < 0 else ""
-    v = abs(val)
-    return f"{sign}${v:,.2f}"
-
-
 def find_pdfs(directory: str) -> list[str]:
-    pdfs = []
-    for f in sorted(os.listdir(directory)):
-        if f.lower().endswith(".pdf"):
-            pdfs.append(os.path.join(directory, f))
-    return pdfs
+    return [str(p) for p in _find_pdfs_path(Path(directory))]
 
 
 # ---------------------------------------------------------------------------
@@ -273,27 +262,12 @@ def find_pdfs(directory: str) -> list[str]:
 
 
 def extract_text(pdf_path: str) -> str:
-    result = subprocess.run(
-        ["pdftotext", "-layout", pdf_path, "-"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout
+    return _extract_text_path(Path(pdf_path))
 
 
 # ---------------------------------------------------------------------------
 # Statement parsing
 # ---------------------------------------------------------------------------
-
-
-def _clean_description(desc: str) -> str:
-    desc = re.sub(r"\d\s+\d{2}/\d{2}", "", desc)
-    desc = re.sub(r"\s+\d{1,2}\s*$", "", desc)
-    desc = re.sub(r"\b\w{50,}\b", "", desc)
-    desc = re.sub(r"\b([A-Za-z]+)\d{1,2}\b", r"\1", desc)
-    desc = re.sub(r"\s+", " ", desc).strip()
-    return desc
 
 
 def _is_page_artifact(line: str, stripped: str) -> bool:
@@ -866,163 +840,6 @@ def chart_category_by_month(statements: list[Statement]) -> io.BytesIO:
 # ---------------------------------------------------------------------------
 
 
-class ReportPDF(FPDF):
-    DEJAVU_SANS = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    DEJAVU_SANS_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-    DEJAVU_MONO = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-    DEJAVU_MONO_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
-
-    def __init__(self, title: str):
-        super().__init__(orientation="P", unit="mm", format="A4")
-        self.title = title
-        self.generated_at = datetime.now().strftime('%Y-%m-%d %H:%M')
-        self.set_auto_page_break(auto=True, margin=18)
-        self.set_margins(12, 12, 12)
-        self.add_font("DJV", "", self.DEJAVU_SANS)
-        self.add_font("DJV", "B", self.DEJAVU_SANS_BOLD)
-        self.add_font("DJV", "I", self.DEJAVU_SANS)  # fallback: no oblique, use regular
-        self.add_font("DJVM", "", self.DEJAVU_MONO)
-        self.add_font("DJVM", "B", self.DEJAVU_MONO_BOLD)
-
-    def header(self):
-        if self.page_no() == 1:
-            return
-        self.set_font("DJV", "I", 7)
-        self.set_text_color(120, 120, 120)
-        self.cell(0, 4, self.title, align="L")
-        self.cell(0, 4, f"Page {self.page_no()}", align="R", new_x="LMARGIN", new_y="NEXT")
-        self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
-        self.ln(3)
-
-    def footer(self):
-        self.set_y(-15)
-        self.set_font("DJV", "I", 6)
-        self.set_text_color(150, 150, 150)
-        self.cell(
-            0, 8,
-            f"Generated {self.generated_at}  |  personal_financial_report.py  |  {_SCRIPT_HASH}",
-            align="C",
-        )
-
-    def section_title(self, text: str):
-        self.set_font("DJV", "B", 14)
-        self.set_text_color(44, 62, 80)
-        self.cell(0, 8, text, new_x="LMARGIN", new_y="NEXT")
-        self.set_draw_color(44, 62, 80)
-        self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
-        self.ln(4)
-
-    def sub_title(self, text: str):
-        self.set_font("DJV", "B", 11)
-        self.set_text_color(52, 73, 94)
-        self.cell(0, 6, text, new_x="LMARGIN", new_y="NEXT")
-        self.ln(2)
-
-    def body_text(self, text: str, size: int = 9):
-        self.set_font("DJV", "", size)
-        self.set_text_color(50, 50, 50)
-        self.multi_cell(0, 4.5, text)
-        self.ln(1)
-
-    def truncate_text(self, text: str, width_mm: float, font_size: int = 7) -> str:
-        self.set_font("DJV", "", font_size)
-        if self.get_string_width(text) <= width_mm:
-            return text
-        ellipsis = "..."
-        while len(text) > 3 and self.get_string_width(text + ellipsis) > width_mm:
-            text = text[:-1]
-        return text + ellipsis
-
-    def draw_table(self, headers: list[str], rows: list[list[str]],
-                   col_widths: list[float] | None = None,
-                   col_aligns: list[str] | None = None,
-                   header_color: tuple = (44, 62, 80),
-                   section_label: str = "",
-                   header_font_size: int = 7,
-                   row_font_size: int = 7,
-                   row_height: float = 4.5):
-        if col_widths is None:
-            usable = self.w - self.l_margin - self.r_margin
-            col_widths = [usable / len(headers)] * len(headers)
-        if col_aligns is None:
-            col_aligns = ["L"] * len(headers)
-
-        header_h = 6
-        min_body_rows = 2
-        header_space = header_h + min_body_rows * row_height + 4
-
-        # If whole table fits, just draw it
-        total_space = header_h + len(rows) * row_height + 4
-        if self.get_y() + total_space <= self.h - self.b_margin:
-            self._draw_table_section(headers, rows, col_widths, col_aligns,
-                                     header_color, header_font_size,
-                                     row_font_size, row_height)
-        else:
-            # Need to paginate
-            if self.get_y() + header_space > self.h - self.b_margin:
-                self.add_page()
-
-            remaining = list(rows)
-            first_page = True
-            while remaining:
-                available = int((self.h - self.b_margin - self.get_y() - header_h) / row_height)
-                if available < min_body_rows and not first_page:
-                    self.add_page()
-                    available = int((self.h - self.b_margin - self.get_y() - header_h) / row_height)
-                elif available < min_body_rows and first_page:
-                    self.add_page()
-                    available = int((self.h - self.b_margin - self.get_y() - header_h) / row_height)
-
-                chunk = remaining[:available]
-                remaining = remaining[available:]
-
-                if not first_page and section_label:
-                    self.set_font("DJV", "I", 7)
-                    self.set_text_color(100, 100, 100)
-                    self.cell(0, 4, f"{section_label} (continued)", new_x="LMARGIN", new_y="NEXT")
-                    self.ln(1)
-
-                self._draw_table_section(headers, chunk, col_widths, col_aligns,
-                                         header_color, header_font_size,
-                                         row_font_size, row_height)
-                first_page = False
-
-    def _draw_table_section(self, headers: list[str], rows: list[list[str]],
-                            col_widths: list[float], col_aligns: list[str],
-                            header_color: tuple, header_font_size: int,
-                            row_font_size: int, row_height: float):
-        # Header
-        self.set_fill_color(*header_color)
-        self.set_text_color(255, 255, 255)
-        self.set_font("DJV", "B", header_font_size)
-        for i, h in enumerate(headers):
-            self.cell(col_widths[i], 6, h, border=0, fill=True, align="C")
-        self.ln()
-
-        # Rows
-        for idx, row in enumerate(rows):
-            if idx % 2 == 0:
-                self.set_fill_color(245, 245, 245)
-            else:
-                self.set_fill_color(255, 255, 255)
-            self.set_text_color(50, 50, 50)
-            self.set_font("DJV", "", row_font_size)
-            for i, cell_text in enumerate(row):
-                truncated = self.truncate_text(cell_text, col_widths[i], row_font_size)
-                self.cell(col_widths[i], row_height, truncated, border=0,
-                          fill=True, align=col_aligns[i])
-            self.ln()
-        self.ln(3)
-
-    def embed_chart(self, buf: io.BytesIO, w: float | None = None):
-        if w is None:
-            w = self.w - self.l_margin - self.r_margin
-        if self.get_y() + w * 0.5 > self.h - 25:
-            self.add_page()
-        self.image(buf, x=self.l_margin, w=w)
-        self.ln(3)
-
-
 def build_monthly_table_rows(stmt: Statement) -> list[list[str]]:
     rows = [
         ["Beginning Balance", fmt_dollar(stmt.beginning_balance)],
@@ -1107,27 +924,6 @@ MERCHANT_ALIASES: list[tuple[str, str]] = [
     ]
 
 EXCLUDED_MERCHANT_CATS = {"Transfers", "Checks", "Bank Fees", "Loan/Credit Payment", "Other"}
-
-
-def normalize_merchant(description: str) -> str:
-    desc = description.upper()
-    for pattern, replacement in MERCHANT_ALIASES:
-        if re.search(pattern, desc):
-            return replacement
-    desc = description
-    desc = re.sub(r'XX\d{4}\s+(POS\s+)?PINNED\s+\d{2}/\d{2}\s+\d{2}:\d{2}\s*', '', desc)
-    desc = re.sub(r'XX\d{4}\s+DEBIT\s+CARD\s+\d{2}/\d{2}\s+\d{2}:\d{2}\s*', '', desc)
-    desc = re.sub(r'DEBIT\s+CARD\s+\d{2}/\d{2}\s+\d{2}:\d{2}\s*', '', desc)
-    desc = re.sub(r'CARD\s+\d{2}/\d{2}\s+\d{2}:\d{2}\s*', '', desc)
-    desc = re.sub(r'\b\d{2}/\d{2}\s+\d{2}:\d{2}\b', '', desc)
-    desc = re.sub(r'\b[0-9A-F]{12,}\b', '', desc)
-    desc = re.sub(r'\b\d{8,}\b', '', desc)
-    desc = re.sub(r'\s+[A-Z]{2}\s+\d{5}(?:-\d{4})?', '', desc)
-    desc = re.sub(r"\b([A-Za-z]{4,})\d{1,2}\b", r"\1", desc)
-    desc = re.sub(r'\s+', ' ', desc).strip()
-    if not desc:
-        desc = description[:80]
-    return desc
 
 
 def build_top_merchants(statements: list[Statement], top_n: int = 15,

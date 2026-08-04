@@ -2,3 +2,11 @@ data/
 *.pdf
 *.csv
 __pycache__/
+venv/
+*.pyc
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+build/
