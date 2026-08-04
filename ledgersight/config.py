@@ -1,18 +1,19 @@
 """Business configuration loading from TOML."""
 from __future__ import annotations
+
 import logging
 import re
 import sys
 import tomllib
-from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from ledgersight.constants import (
-    _DEFAULT_CONFIG, VALID_DEDUCTIBILITY, VALID_ENTITY_TYPES,
+    VALID_DEDUCTIBILITY,
+    VALID_ENTITY_TYPES,
 )
-from ledgersight.models import BusinessConfig, CategoryRule, Transaction, Statement
+from ledgersight.models import BusinessConfig, CategoryRule
 
 logger = logging.getLogger("ledgersight.config")
 
@@ -27,9 +28,10 @@ def safe_float_or_none(value: Any) -> float | None:
         return None
 
 
-def validate_config(config: BusinessConfig) -> list[str]:
-    """Return a list of configuration error messages (empty = valid)."""
+def validate_config(config: BusinessConfig) -> tuple[list[str], list[str]]:
+    """Return (errors, warnings) — errors are fatal, warnings reduce confidence."""
     errors: list[str] = []
+    warnings: list[str] = []
 
     if not (1 <= config.fiscal_year_start <= 12):
         errors.append(f"fiscal_year_start must be 1-12, got {config.fiscal_year_start}")
@@ -83,26 +85,26 @@ def validate_config(config: BusinessConfig) -> list[str]:
 
     for i, rule in enumerate(config.custom_rules):
         if rule.deductibility not in VALID_DEDUCTIBILITY:
-            errors.append(
-                f"custom_rules[{i}] deductibility '{rule.deductibility}' is not valid; "
+            warnings.append(
+                f"custom_rules[{i}] deductibility '{rule.deductibility}' is not recognized; "
                 f"must be one of {sorted(VALID_DEDUCTIBILITY)} "
                 f"(category='{rule.category}')"
             )
 
     for key, value in config.merchant_aliases.items():
         if not key or not key.strip():
-            errors.append("merchant_aliases contains an empty key")
+            warnings.append("merchant_aliases contains an empty key")
         if not value or not value.strip():
-            errors.append(f"merchant_aliases['{key}'] has an empty value")
+            warnings.append(f"merchant_aliases['{key}'] has an empty value")
 
-    return errors
+    return errors, warnings
 
 
 def validate_config_strict(config: BusinessConfig) -> None:
-    """Raise ValueError if *config* fails validation."""
-    errors = validate_config(config)
+    """Raise ValueError if *config* has fatal errors."""
+    errors, _warnings = validate_config(config)
     if errors:
-        raise ValueError("\n".join(errors))
+        raise ValueError("Configuration errors:\n" + "\n".join(f"  - {e}" for e in errors))
 
 # =============================================================================
 # Example TOML Configuration
@@ -363,7 +365,10 @@ def load_config(config_path: Path, was_explicit: bool = False) -> BusinessConfig
                 is_income=rule_data.get("is_income", False),
                 include_in_pnl=include_pl,
                 is_transfer=rule_data.get("is_transfer", cat in ("Account Transfer", "Credit Card Payment")),
-                is_owner_related=rule_data.get("is_owner_related", cat in ("Owner Contribution", "Owner Draw or Distribution")),
+                is_owner_related=rule_data.get(
+                    "is_owner_related",
+                    cat in ("Owner Contribution", "Owner Draw or Distribution"),
+                ),
                 is_fixed_asset=rule_data.get("is_fixed_asset", cat == "Fixed Asset Purchase"),
                 is_loan=rule_data.get("is_loan", cat in ("Loan Proceeds", "Loan Principal Payment", "Loan Interest")),
                 direction=rule_data.get("direction", "either"),
@@ -390,9 +395,16 @@ def load_config(config_path: Path, was_explicit: bool = False) -> BusinessConfig
         )
         sys.exit(1)
 
-    errors = validate_config(config)
+    errors, warnings = validate_config(config)
     for err in errors:
-        logger.warning("Config validation: %s", err)
+        logger.error("Config validation error: %s", err)
+    for warn in warnings:
+        logger.warning("Config validation warning: %s", warn)
+    if errors:
+        logger.error(
+            "Configuration has %d fatal error(s). Report generation may be unreliable.",
+            len(errors),
+        )
 
     return config
 

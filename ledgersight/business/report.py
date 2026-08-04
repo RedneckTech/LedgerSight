@@ -9,26 +9,35 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from ledgersight.models import Statement, Transaction, BusinessConfig, ReconciliationResult
-from ledgersight.redaction import DataRedactor
-from ledgersight.charts import (
-    _empty_chart_buf, chart_revenue_vs_expenses_monthly, chart_profit_monthly,
-    chart_net_cash_flow, chart_balance_trend, chart_expenses_by_category,
-    chart_revenue_by_category, chart_cost_by_month, chart_projection,
-    chart_top_vendors, chart_top_revenue_sources,
-)
+from ledgersight.business.kpis import FinancialKPIs, calculate_kpis
+from ledgersight.business.periods import fiscal_quarter_range
+from ledgersight.business.pl import ProfitAndLoss, build_monthly_pls, build_pl, build_quarterly_pls
+from ledgersight.business.projections import ProjectionEngine, ProjectionResult
 from ledgersight.categorizer import TransactionCategorizer, normalize_merchant
-from ledgersight.constants import _PNL_DISCLAIMER, _CPA_DISCLAIMER, _QUARTER_MONTHS
+from ledgersight.charts import (
+    chart_balance_trend,
+    chart_cost_by_month,
+    chart_expenses_by_category,
+    chart_net_cash_flow,
+    chart_profit_monthly,
+    chart_projection,
+    chart_revenue_by_category,
+    chart_revenue_vs_expenses_monthly,
+    chart_top_revenue_sources,
+    chart_top_vendors,
+)
+from ledgersight.constants import _CPA_DISCLAIMER, _PNL_DISCLAIMER
 from ledgersight.exports import CSVExporter, get_fixed_asset_candidates
+from ledgersight.models import BusinessConfig, ReconciliationResult, Statement
 from ledgersight.parsers import (
-    parse_amount, safe_pct, safe_div, _parse_daily_date, fmt_dollar,
+    _parse_daily_date,
+    fmt_dollar,
+    parse_amount,
+    safe_pct,
 )
 from ledgersight.pdf_renderer import ReportPDF
-from ledgersight.business.pl import ProfitAndLoss, build_pl, build_monthly_pls, build_quarterly_pls
-from ledgersight.business.kpis import FinancialKPIs, calculate_kpis
-from ledgersight.business.projections import ProjectionResult, ProjectionEngine
-from ledgersight.business.periods import _fiscal_quarter_months, fiscal_quarter_range
 from ledgersight.reconciliation import reconcile_all
+from ledgersight.redaction import DataRedactor
 
 logger = logging.getLogger("ledgersight.business.report")
 
@@ -121,7 +130,7 @@ class ReportBuilder:
         elif self.projection_status == "withheld":
             pdf.add_page()
             pdf.section_title("Financial Projections")
-            pdf.set_font("DJV", "B", 10)
+            pdf.set_font(pdf.body_font, "B", 10)
             pdf.set_text_color(180, 60, 60)
             pdf.multi_cell(
                 0, 5,
@@ -131,7 +140,7 @@ class ReportBuilder:
             )
         elif self.mode in ("combined", "yearly"):
             pdf.ln(4)
-            pdf.set_font("DJV", "I", 8)
+            pdf.set_font(pdf.body_font, "I", 8)
             pdf.set_text_color(130, 130, 130)
             pdf.multi_cell(
                 0, 4,
@@ -152,17 +161,18 @@ class ReportBuilder:
     def _cover_page(self, pdf: ReportPDF):
         pdf.add_page()
         pdf.ln(20)
-        pdf.set_font("DJV", "B", 26)
+        pdf.set_font(pdf.body_font, "B", 26)
         pdf.set_text_color(44, 62, 80)
         pdf.cell(0, 14, "Business Financial Report", align="C", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(4)
 
-        pdf.set_font("DJV", "B", 14)
+        pdf.set_font(pdf.body_font, "B", 14)
         pdf.set_text_color(80, 80, 80)
-        pdf.cell(0, 9, self.config.display_name(), align="C", new_x="LMARGIN", new_y="NEXT")
+        name = self.redactor.person(self.config.display_name())
+        pdf.cell(0, 9, name, align="C", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(6)
 
-        pdf.set_font("DJV", "", 10)
+        pdf.set_font(pdf.body_font, "", 10)
         pdf.set_text_color(100, 100, 100)
         if self.period_start_date or self.period_end_date:
             if self.period_start_date and self.period_end_date:
@@ -183,11 +193,11 @@ class ReportBuilder:
         pdf.cell(0, 7, acct, align="C", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(10)
 
-        pdf.set_font("DJV", "I", 8)
+        pdf.set_font(pdf.body_font, "I", 8)
         pdf.set_text_color(150, 150, 150)
         pdf.cell(0, 5, _PNL_DISCLAIMER, align="C", new_x="LMARGIN", new_y="NEXT")
         if len(self.statements) < 12:
-            pdf.set_font("DJV", "B", 8)
+            pdf.set_font(pdf.body_font, "B", 8)
             pdf.set_text_color(180, 120, 40)
             pdf.cell(0, 5,
                      f"Partial-year report \u2014 {12 - len(self.statements)} month(s) not included",
@@ -206,10 +216,10 @@ class ReportBuilder:
         cw = [pdf.w - pdf.l_margin - pdf.r_margin - 50, 50]
         for label, val in summary_rows:
             pdf.set_fill_color(245, 245, 245)
-            pdf.set_font("DJV", "B", 9)
+            pdf.set_font(pdf.body_font, "B", 9)
             pdf.set_text_color(50, 50, 50)
             pdf.cell(cw[0], 7, f"  {label}", fill=True)
-            pdf.set_font("DJV", "", 9)
+            pdf.set_font(pdf.body_font, "", 9)
             pdf.cell(cw[1], 7, val, fill=True, align="R", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(6)
 
@@ -229,7 +239,7 @@ class ReportBuilder:
         )
         pdf.body_text(f"Total Transactions: {total_tx}", size=8)
         if cpa_review_count > 0:
-            pdf.set_font("DJV", "B", 8)
+            pdf.set_font(pdf.body_font, "B", 8)
             pdf.set_text_color(180, 60, 60)
             pdf.multi_cell(
                 0, 4.5,
@@ -240,9 +250,18 @@ class ReportBuilder:
     def _executive_summary(self, pdf: ReportPDF):
         pdf.add_page()
         pdf.section_title("Executive Financial Summary")
+        if self.mask_personal:
+            pdf.set_font(pdf.body_font, "I", 7)
+            pdf.set_text_color(130, 130, 130)
+            pdf.cell(0, 5, "Personally identifiable information has been redacted.",
+                     new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(3)
         if self.period_start_date or self.period_end_date:
             if self.period_start_date and self.period_end_date:
-                period_label = f"{self.period_start_date.strftime('%B %d, %Y')} - {self.period_end_date.strftime('%B %d, %Y')}"
+                period_label = (
+                    f"{self.period_start_date.strftime('%B %d, %Y')} - "
+                    f"{self.period_end_date.strftime('%B %d, %Y')}"
+                )
             elif self.period_start_date:
                 period_label = f"{self.period_start_date.strftime('%B %d, %Y')} - {self.statements[-1].month_label}"
             else:
@@ -318,7 +337,10 @@ class ReportBuilder:
             tx.amount for s in self.statements for tx in s.transactions
             if tx.cpa_review and not tx.is_credit
         )
-        pnl_status = "Preliminary \u2014 classification incomplete" if classified_pct < 80 else "Substantially classified"
+        pnl_status = (
+            "Preliminary \u2014 classification incomplete" if classified_pct < 80
+            else "Substantially classified"
+        )
         if classified_pct < 50:
             pnl_status = "Highly Preliminary \u2014 majority unclassified"
 
@@ -449,7 +471,7 @@ class ReportBuilder:
                     header_font_size=7,
                     row_font_size=7,
                 )
-            pdf.set_font("DJV", "B", 8)
+            pdf.set_font(pdf.body_font, "B", 8)
             pdf.set_text_color(44, 62, 80)
             pdf.cell(60, 5, subtotal_label)
             pdf.cell(30, 5, fmt_dollar(subtotal_val), align="R")
@@ -459,14 +481,14 @@ class ReportBuilder:
         _section("Revenue", income_rows, "Total Revenue", total_rev)
         _section("Cost of Goods Sold / Direct Costs", cogs_rows,
                  "Total COGS / Direct Costs", pl.total_direct_costs)
-        pdf.set_font("DJV", "B", 9)
+        pdf.set_font(pdf.body_font, "B", 9)
         pdf.cell(60, 6, "Gross Profit")
         pdf.cell(30, 6, fmt_dollar(pl.gross_profit), align="R")
         pdf.cell(30, 6, pl.gross_margin, align="R", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(4)
         _section("Operating Expenses", op_exp_rows,
                  "Total Operating Expenses", pl.total_operating_expenses)
-        pdf.set_font("DJV", "B", 9)
+        pdf.set_font(pdf.body_font, "B", 9)
         pdf.cell(60, 6, "Operating Profit (Loss)")
         pdf.cell(30, 6, fmt_dollar(pl.operating_profit), align="R")
         pdf.cell(30, 6, pl.operating_margin, align="R", new_x="LMARGIN", new_y="NEXT")
@@ -475,7 +497,7 @@ class ReportBuilder:
                  "Total Other Income", pl.total_other_income)
         _section("Other Expense", other_exp_rows,
                  "Total Other Expense", pl.total_other_expense)
-        pdf.set_font("DJV", "B", 10)
+        pdf.set_font(pdf.body_font, "B", 10)
         pdf.set_fill_color(44, 62, 80)
         pdf.set_text_color(255, 255, 255)
         pdf.cell(60, 7, "Net Profit (Loss)", fill=True)
@@ -508,7 +530,7 @@ class ReportBuilder:
         )
         total_tx = sum(len(s.transactions) for s in self.statements)
         if cpa_review_count > 0:
-            pdf.set_font("DJV", "B", 9)
+            pdf.set_font(pdf.body_font, "B", 9)
             pdf.set_text_color(180, 60, 60)
             pdf.multi_cell(
                 0, 5,
@@ -575,7 +597,11 @@ class ReportBuilder:
 
         _add_section("Revenue", "R", lambda pl: pl.revenue, lambda pl: pl.total_revenue)
         _add_section("Direct Costs / COGS", "D", lambda pl: pl.direct_costs, lambda pl: pl.total_direct_costs)
-        _add_section("Operating Expenses", "O", lambda pl: pl.operating_expenses, lambda pl: pl.total_operating_expenses)
+        _add_section(
+            "Operating Expenses", "O",
+            lambda pl: pl.operating_expenses,
+            lambda pl: pl.total_operating_expenses,
+        )
 
         pdf.sub_title("Profit Summary")
         sum_headers = ["Metric"] + month_labels_short + [period_label]
@@ -610,7 +636,7 @@ class ReportBuilder:
                 pdf.draw_table(["Category", "Amount", "% of Revenue"], income_rows,
                                col_widths=[60, 35, 25], col_aligns=["L", "R", "R"],
                                header_font_size=7, row_font_size=7)
-            pdf.set_font("DJV", "B", 8)
+            pdf.set_font(pdf.body_font, "B", 8)
             pdf.set_text_color(44, 62, 80)
             pdf.cell(60, 5, "Total Revenue")
             pdf.cell(35, 5, fmt_dollar(total_rev), align="R", new_x="LMARGIN", new_y="NEXT")
@@ -625,12 +651,12 @@ class ReportBuilder:
                 pdf.draw_table(["Category", "Amount", "% of Revenue"], cogs_rows,
                                col_widths=[60, 35, 25], col_aligns=["L", "R", "R"],
                                header_font_size=7, row_font_size=7)
-            pdf.set_font("DJV", "B", 8)
+            pdf.set_font(pdf.body_font, "B", 8)
             pdf.set_text_color(44, 62, 80)
             pdf.cell(60, 5, "Total Direct Costs")
             pdf.cell(35, 5, fmt_dollar(pl.total_direct_costs), align="R", new_x="LMARGIN", new_y="NEXT")
             pdf.ln(2)
-            pdf.set_font("DJV", "B", 9)
+            pdf.set_font(pdf.body_font, "B", 9)
             pdf.cell(60, 6, f"Gross Profit: {fmt_dollar(pl.gross_profit)} ({pl.gross_margin})",
                      new_x="LMARGIN", new_y="NEXT")
             pdf.ln(4)
@@ -644,13 +670,13 @@ class ReportBuilder:
                 pdf.draw_table(["Category", "Amount", "% of Revenue"], op_rows,
                                col_widths=[60, 35, 25], col_aligns=["L", "R", "R"],
                                header_font_size=7, row_font_size=7)
-            pdf.set_font("DJV", "B", 8)
+            pdf.set_font(pdf.body_font, "B", 8)
             pdf.set_text_color(44, 62, 80)
             pdf.cell(60, 5, "Total Operating Expenses")
             pdf.cell(35, 5, fmt_dollar(pl.total_operating_expenses), align="R",
                      new_x="LMARGIN", new_y="NEXT")
             pdf.ln(2)
-            pdf.set_font("DJV", "B", 9)
+            pdf.set_font(pdf.body_font, "B", 9)
             pdf.cell(60, 6, f"Operating Profit: {fmt_dollar(pl.operating_profit)} ({pl.operating_margin})",
                      new_x="LMARGIN", new_y="NEXT")
             pdf.ln(4)
@@ -660,20 +686,20 @@ class ReportBuilder:
                 if pl.total_other_income != 0:
                     for cat, val in sorted(pl.other_income.items()):
                         if val != 0:
-                            pdf.set_font("DJV", "", 8)
+                            pdf.set_font(pdf.body_font, "", 8)
                             pdf.cell(60, 5, f"  {cat}")
                             pdf.cell(35, 5, fmt_dollar(val), align="R",
                                      new_x="LMARGIN", new_y="NEXT")
                 if pl.total_other_expense != 0:
                     for cat, val in sorted(pl.other_expense.items()):
                         if val != 0:
-                            pdf.set_font("DJV", "", 8)
+                            pdf.set_font(pdf.body_font, "", 8)
                             pdf.cell(60, 5, f"  {cat}")
                             pdf.cell(35, 5, fmt_dollar(val), align="R",
                                      new_x="LMARGIN", new_y="NEXT")
                 pdf.ln(4)
 
-            pdf.set_font("DJV", "B", 10)
+            pdf.set_font(pdf.body_font, "B", 10)
             pdf.set_fill_color(44, 62, 80)
             pdf.set_text_color(255, 255, 255)
             pdf.cell(60, 7, "Net Profit (Loss)", fill=True)
@@ -881,7 +907,7 @@ class ReportBuilder:
         preliminary = classified_pct < 80
 
         if preliminary:
-            pdf.set_font("DJV", "B", 8)
+            pdf.set_font(pdf.body_font, "B", 8)
             pdf.set_text_color(180, 60, 60)
             pdf.multi_cell(
                 0, 4.5,
@@ -1038,8 +1064,8 @@ class ReportBuilder:
             )
         else:
             pdf.body_text_small(
-                f"Transaction detail excerpt \u2014 up to 50 transactions per statement. "
-                f"Use --full-detail for the complete listing."
+                "Transaction detail excerpt \u2014 up to 50 transactions per statement. "
+                "Use --full-detail for the complete listing."
             )
 
         for stmt in self.statements:
@@ -1085,15 +1111,15 @@ class ReportBuilder:
     def _cpa_package(self, pdf: ReportPDF):
         pdf.add_page()
         pdf.ln(30)
-        pdf.set_font("DJV", "B", 22)
+        pdf.set_font(pdf.body_font, "B", 22)
         pdf.set_text_color(44, 62, 80)
         pdf.cell(0, 12, "CPA / Tax Preparer Package", align="C", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(6)
-        pdf.set_font("DJV", "", 10)
+        pdf.set_font(pdf.body_font, "", 10)
         pdf.set_text_color(100, 100, 100)
-        pdf.cell(0, 7, self.config.display_name(), align="C", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 7, self.redactor.person(self.config.display_name()), align="C", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(8)
-        pdf.set_font("DJV", "I", 8)
+        pdf.set_font(pdf.body_font, "I", 8)
         pdf.set_text_color(150, 150, 150)
         pdf.multi_cell(0, 4.5, _CPA_DISCLAIMER, align="C")
         pdf.ln(4)
@@ -1119,19 +1145,25 @@ class ReportBuilder:
         pdf.add_page()
         pdf.section_title("Page 1: Business and Report Information")
         rows = [
-            ("Legal Business Name", self.config.business_name),
-            ("DBA", self.config.dba or "N/A"),
+            ("Legal Business Name", self.redactor.person(self.config.business_name)),
+            ("DBA", self.redactor.person(self.config.dba) if self.config.dba else "N/A"),
             ("Entity Type", self.config.entity_type),
             ("Tax Year", str(self.config.tax_year)),
             ("Fiscal Year Start", f"Month {self.config.fiscal_year_start}"),
             ("Accounting Method", self.config.accounting_method),
             ("Masked EIN", self.config.masked_ein() or "N/A"),
             ("Bank Account", self.config.masked_account() or "N/A"),
+            ("CPA Name", self.redactor.person(self.config.cpa_name) if self.config.cpa_name else "N/A"),
+            ("CPA Firm", self.redactor.person(self.config.cpa_firm) if self.config.cpa_firm else "N/A"),
+            ("CPA Phone", self.redactor.description(self.config.cpa_phone) if self.config.cpa_phone else "N/A"),
+            ("CPA Email", self.redactor.description(self.config.cpa_email) if self.config.cpa_email else "N/A"),
             ("Report Generated", datetime.now().strftime("%Y-%m-%d %H:%M")),
             ("Source Statements", str(len(self.statements))),
             ("First Statement", self.statements[0].month_label if self.statements else "N/A"),
             ("Last Statement", self.statements[-1].month_label if self.statements else "N/A"),
-            ("Reconciliation Status", "PASSED" if self.all_reconciled else ("FORCED" if self.forced_generation else "FAILED")),
+            ("Reconciliation Status",
+             "PASSED" if self.all_reconciled
+             else ("FORCED" if self.forced_generation else "FAILED")),
             ("Script Version", _SCRIPT_HASH),
         ]
         pdf.draw_kv_table(rows)
@@ -1249,7 +1281,10 @@ class ReportBuilder:
         pdf.add_page()
         pdf.section_title("Page 3: Expense Summary by Tax Category")
         if self.config.entity_type in ("sole-prop", "single-member-llc"):
-            pdf.body_text_small("Suggested Schedule C organizational aid. Verify all classifications with a tax professional.")
+            pdf.body_text_small(
+                "Suggested Schedule C organizational aid. "
+                "Verify all classifications with a tax professional."
+            )
         else:
             pdf.body_text_small("Tax preparation categories. Verify all classifications with a tax professional.")
 
@@ -1338,7 +1373,7 @@ class ReportBuilder:
         )
         if has_factoring_like:
             pdf.ln(4)
-            pdf.set_font("DJV", "B", 8)
+            pdf.set_font(pdf.body_font, "B", 8)
             pdf.set_text_color(180, 120, 40)
             pdf.multi_cell(
                 0, 4.5,
@@ -1667,7 +1702,7 @@ class ReportBuilder:
         all_passed = True
         for rr in self.recon_results:
             if not rr.passed:
-                all_passed = False
+                all_passed = False  # noqa: F841
                 for w in rr.warnings:
                     rows.append([rr.statement_label, "FAIL", w])
             else:
@@ -1716,7 +1751,10 @@ class ReportBuilder:
         uncat_loans = sum(1 for tx in cpa_review_tx if tx.is_loan)
 
         if uncat_deposits > 0:
-            questions.append(f"Which of the {uncat_deposits} unidentified deposits are loans, transfers, contributions, or revenue?")
+            questions.append(
+                f"Which of the {uncat_deposits} unidentified deposits are "
+                f"loans, transfers, contributions, or revenue?"
+            )
         if uncat_debits > 0:
             questions.append(f"Which of the {uncat_debits} uncategorized expense transactions need reclassification?")
         if uncat_transfers > 0:
@@ -1743,7 +1781,7 @@ class ReportBuilder:
         ])
 
         for i, q in enumerate(questions, 1):
-            pdf.set_font("DJV", "", 9)
+            pdf.set_font(pdf.body_font, "", 9)
             pdf.set_text_color(50, 50, 50)
             pdf.cell(10, 6, f"{i}.", align="R")
             pdf.multi_cell(0, 6, q)
@@ -1834,16 +1872,16 @@ class ReportBuilder:
 
         pdf.ln(8)
         fields = [
-            ("Prepared For:", self.config.display_name()),
-            ("Prepared By:", self.config.cpa_name or "__________"),
-            ("CPA Firm:", self.config.cpa_firm or "__________"),
+            ("Prepared For:", self.redactor.person(self.config.display_name())),
+            ("Prepared By:", self.redactor.person(self.config.cpa_name) if self.config.cpa_name else "__________"),
+            ("CPA Firm:", self.redactor.person(self.config.cpa_firm) if self.config.cpa_firm else "__________"),
             ("Date Reviewed:", "__________"),
         ]
         for label, val in fields:
-            pdf.set_font("DJV", "B", 9)
+            pdf.set_font(pdf.body_font, "B", 9)
             pdf.set_text_color(50, 50, 50)
             pdf.cell(35, 8, label)
-            pdf.set_font("DJV", "", 9)
+            pdf.set_font(pdf.body_font, "", 9)
             pdf.cell(80, 8, val, new_x="LMARGIN", new_y="NEXT")
 
         pdf.ln(6)
@@ -1863,7 +1901,7 @@ class ReportBuilder:
             pdf.cell(0, 8, "", border="B", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(6)
 
-        pdf.set_font("DJV", "", 9)
+        pdf.set_font(pdf.body_font, "", 9)
         pdf.set_text_color(50, 50, 50)
         pdf.cell(0, 8, "Business Owner Signature: ________________________  Date: ________",
                  new_x="LMARGIN", new_y="NEXT")
@@ -1963,11 +2001,14 @@ def build_report(
                 last_tx = sorted_tx[-1]
                 period_start_balance = first_tx.balance - first_tx.signed_amount
                 period_end_balance = last_tx.balance
-                period_daily: list[dict] = [
-                    db for db in stmt.daily_balances
-                    if (sd is None or _parse_daily_date(db.get("date", "")) >= sd)
-                    and (ed is None or _parse_daily_date(db.get("date", "")) <= ed)
-                ]
+                period_daily: list[dict] = []
+                for entry in stmt.daily_balances:
+                    parsed = _parse_daily_date(entry.get("date", ""))
+                    if parsed is None:
+                        logger.warning("Invalid daily balance date: %r", entry.get("date"))
+                        continue
+                    if (sd is None or parsed >= sd) and (ed is None or parsed <= ed):
+                        period_daily.append(entry)
                 filtered_stmts.append(Statement(
                     statement_date=stmt.statement_date,
                     account_number=stmt.account_number,
@@ -2108,6 +2149,9 @@ def build_report(
             )
         ])
     existing = [p for p in output_paths_to_check if p.exists()]
+    if category_template_path:
+        output_paths_to_check.append(category_template_path)
+    existing = [p for p in output_paths_to_check if p.exists()]
     if existing and not overwrite:
         paths_str = "\n  ".join(str(p) for p in existing)
         logger.error(
@@ -2116,7 +2160,27 @@ def build_report(
         )
         sys.exit(1)
 
-    redactor = DataRedactor(mask_personal=mask_personal, redact_names=owner_names)
+    redact_names = [
+        value
+        for value in (
+            *config.owners,
+            config.business_name,
+            config.dba,
+            config.cpa_name,
+            config.cpa_firm,
+            config.cpa_email,
+            config.cpa_phone,
+        )
+        if value
+    ]
+    redact_addresses = [config.address] if config.address else []
+    redact_paths = list({s.file_path for s in statements if s.file_path})
+    redactor = DataRedactor(
+        mask_personal=mask_personal,
+        redact_names=redact_names,
+        redact_addresses=redact_addresses,
+        redact_paths=redact_paths,
+    )
     builder = ReportBuilder(
         statements=report_statements,
         config=config,

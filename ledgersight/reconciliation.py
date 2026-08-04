@@ -1,5 +1,6 @@
 """Bank statement reconciliation."""
 from __future__ import annotations
+
 import logging
 from decimal import Decimal
 
@@ -109,7 +110,11 @@ def reconcile_all(
                 ending_balance=curr_beginning,
                 calculated_ending=prev_ending,
                 balance_ok=False,
-                warnings=[f"Balance discontinuity: prev ending={prev_ending}, curr beginning={curr_beginning}, gap={curr_beginning - prev_ending}"],
+                warnings=[
+                    f"Balance discontinuity: prev ending={prev_ending}, "
+                    f"curr beginning={curr_beginning}, "
+                    f"gap={curr_beginning - prev_ending}"
+                ],
             ))
             all_reconciled = False
 

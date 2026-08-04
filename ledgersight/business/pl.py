@@ -1,10 +1,11 @@
 """Cash-basis Profit & Loss calculation."""
 from __future__ import annotations
+
 from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal
 
-from ledgersight.categorizer import _INCOME_CATEGORIES, _EXPENSE_CATEGORIES, normalize_merchant
+from ledgersight.categorizer import _EXPENSE_CATEGORIES, _INCOME_CATEGORIES, normalize_merchant
 from ledgersight.models import Statement, Transaction
 from ledgersight.parsers import safe_pct
 
@@ -25,9 +26,11 @@ def _find_best_reversal_match(
             ratio = Decimal("0")
         else:
             ratio = min(reversal_amount, dt.amount) / max(reversal_amount, dt.amount)
-        if ratio < (Decimal("1") - _AMOUNT_TOLERANCE):
+        if reversal_amount < dt.amount and ratio < (Decimal("1") - _AMOUNT_TOLERANCE):
             continue
-        delta_days = abs((reversal_date - dt.date_obj).days)
+        delta_days = (reversal_date - dt.date_obj).days
+        if delta_days < 0 or delta_days > 90:
+            continue
         score = ratio - Decimal(delta_days) / Decimal("36500")
         if score > best_score:
             best_score = score
@@ -192,14 +195,18 @@ def build_pl(
                 best_idx, best_dt = best
                 matched_debit_indices.add(best_idx)
                 orig_cat = best_dt.business_category
+                apply_amount = min(tx.amount, best_dt.amount)
+                remainder = tx.amount - apply_amount
                 if orig_cat in _DIRECT_COST_CATS:
-                    pl.direct_costs[orig_cat] -= tx.amount
+                    pl.direct_costs[orig_cat] -= apply_amount
                 elif orig_cat in _OP_EXPENSE_CATS:
-                    pl.operating_expenses[orig_cat] -= tx.amount
+                    pl.operating_expenses[orig_cat] -= apply_amount
                 elif orig_cat in _INCOME_CAT_SET:
-                    pl.revenue[orig_cat] -= tx.amount
+                    pl.revenue[orig_cat] -= apply_amount
                 else:
-                    pl.payment_reversals += tx.amount
+                    pl.payment_reversals += apply_amount
+                if remainder > 0:
+                    pl.payment_reversals += remainder
             else:
                 pl.payment_reversals += tx.amount
             continue

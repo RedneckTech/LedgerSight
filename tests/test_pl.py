@@ -200,6 +200,39 @@ class TestProfitAndLoss(unittest.TestCase):
         self.assertEqual(pl.payment_reversals, Decimal("50.00"),
                          "Reversal with no matching debits goes to review bucket")
 
+    def test_reversal_does_not_match_future_debit(self):
+        txs = [
+            make_tx(post_date="01/25/2025", description="VENDOR D", amount="150.00",
+                    is_credit=False, business_category="Materials and Supplies", include_in_pnl=True),
+            make_tx(post_date="01/20/2025", description="VENDOR D", amount="150.00",
+                    is_credit=True, business_category="Payment Reversal", include_in_pnl=True),
+        ]
+        pl = build_pl(txs)
+        self.assertEqual(pl.total_direct_costs, Decimal("150.00"))
+        self.assertGreater(pl.payment_reversals, Decimal("0"))
+
+    def test_reversal_larger_than_debit(self):
+        txs = [
+            make_tx(post_date="01/15/2025", description="VENDOR E", amount="150.00",
+                    is_credit=False, business_category="Materials and Supplies", include_in_pnl=True),
+            make_tx(post_date="01/20/2025", description="VENDOR E", amount="200.00",
+                    is_credit=True, business_category="Payment Reversal", include_in_pnl=True),
+        ]
+        pl = build_pl(txs)
+        self.assertEqual(pl.total_direct_costs, Decimal("0"))
+        self.assertGreater(pl.payment_reversals, Decimal("0"))
+
+    def test_reversal_lookback_limit(self):
+        txs = [
+            make_tx(post_date="01/01/2025", description="VENDOR F", amount="150.00",
+                    is_credit=False, business_category="Materials and Supplies", include_in_pnl=True),
+            make_tx(post_date="05/01/2025", description="VENDOR F", amount="150.00",
+                    is_credit=True, business_category="Payment Reversal", include_in_pnl=True),
+        ]
+        pl = build_pl(txs)
+        self.assertEqual(pl.total_direct_costs, Decimal("150.00"))
+        self.assertGreater(pl.payment_reversals, Decimal("0"))
+
 
 class TestProfitAndLossByPeriod(unittest.TestCase):
     def test_monthly_pls(self):

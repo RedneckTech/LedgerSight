@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
 from ledgersight.categorizer import normalize_merchant
-from ledgersight.models import Statement, Transaction
+from ledgersight.models import Statement
 from ledgersight.redaction import DataRedactor
 
 if TYPE_CHECKING:
@@ -186,7 +186,7 @@ def chart_expenses_by_category(pl: ProfitAndLoss) -> io.BytesIO:
     )
     for t in autotexts:
         t.set_fontsize(7)
-    legend_labels = [f"{l} (${s:,.0f})" for l, s in zip(labels, sizes)]
+    legend_labels = [f"{lb} (${sz:,.0f})" for lb, sz in zip(labels, sizes)]
     ax.legend(wedges, legend_labels, title="Expenses", loc="center left",
               bbox_to_anchor=(1, 0.5), fontsize=7)
     ax.set_title("Expenses by Category", fontsize=11, fontweight="bold")
@@ -219,7 +219,7 @@ def chart_revenue_by_category(pl: ProfitAndLoss) -> io.BytesIO:
     )
     for t in autotexts:
         t.set_fontsize(7)
-    legend_labels = [f"{l} (${s:,.0f})" for l, s in zip(labels, sizes)]
+    legend_labels = [f"{lb} (${sz:,.0f})" for lb, sz in zip(labels, sizes)]
     ax.legend(wedges, legend_labels, title="Revenue", loc="center left",
               bbox_to_anchor=(1, 0.5), fontsize=7)
     ax.set_title("Revenue by Category", fontsize=11, fontweight="bold")

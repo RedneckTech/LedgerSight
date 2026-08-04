@@ -1,12 +1,10 @@
 """Transaction categorization engine."""
 from __future__ import annotations
+
 import logging
 import re
-from fnmatch import fnmatch
-from decimal import Decimal
 
-from ledgersight.constants import VALID_DEDUCTIBILITY
-from ledgersight.models import CategoryRule, Transaction, Statement
+from ledgersight.models import CategoryRule, Statement, Transaction
 
 logger = logging.getLogger("ledgersight.categorizer")
 

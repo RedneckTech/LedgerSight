@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 
-from tests.conftest import make_tx, make_stmt
+from tests.conftest import make_stmt, make_tx
 
 
 class TestTransaction(unittest.TestCase):

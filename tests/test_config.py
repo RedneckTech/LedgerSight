@@ -7,7 +7,7 @@ from ledgersight.config import (
     load_config,
     validate_config,
 )
-from ledgersight.models import BusinessConfig, CategoryRule
+from ledgersight.models import BusinessConfig
 
 
 class TestBusinessConfig(unittest.TestCase):
@@ -74,28 +74,31 @@ class TestConfigLoading(unittest.TestCase):
 class TestConfigValidation(unittest.TestCase):
     def test_validates_fiscal_year_start_range(self):
         ok_jan = BusinessConfig(fiscal_year_start=1)
-        self.assertEqual(validate_config(ok_jan), [])
+        errors, _ = validate_config(ok_jan)
+        self.assertEqual(errors, [])
 
         ok_dec = BusinessConfig(fiscal_year_start=12)
-        self.assertEqual(validate_config(ok_dec), [])
+        errors, _ = validate_config(ok_dec)
+        self.assertEqual(errors, [])
 
         bad = BusinessConfig(fiscal_year_start=14)
-        errors = validate_config(bad)
+        errors, _ = validate_config(bad)
         self.assertTrue(any("fiscal_year_start" in e for e in errors))
 
     def test_validates_entity_type(self):
         ok = BusinessConfig(entity_type="s-corp")
-        self.assertEqual(validate_config(ok), [])
+        errors, _ = validate_config(ok)
+        self.assertEqual(errors, [])
 
         bad = BusinessConfig(entity_type="nonprofit")
-        errors = validate_config(bad)
+        errors, _ = validate_config(bad)
         self.assertTrue(any("entity_type" in e for e in errors))
 
     def test_validates_projection_months_positive(self):
         zero = BusinessConfig(projection_config={"projection_months": 0})
-        errors = validate_config(zero)
+        errors, _ = validate_config(zero)
         self.assertTrue(any("projection_months" in e for e in errors))
 
         neg = BusinessConfig(projection_config={"projection_months": -12})
-        errors = validate_config(neg)
+        errors, _ = validate_config(neg)
         self.assertTrue(any("projection_months" in e for e in errors))

@@ -1,27 +1,25 @@
 """Business report CLI (headless mode)."""
 from __future__ import annotations
+
 import argparse
 import logging
 import subprocess
 import sys
-from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from ledgersight.config import load_config, generate_example_config
+from ledgersight.business.periods import _fiscal_quarter_months
+from ledgersight.business.report import build_report
+from ledgersight.config import generate_example_config, load_config
 from ledgersight.constants import _DEFAULT_CONFIG
-from ledgersight.models import Statement, BusinessConfig
+from ledgersight.models import Statement
 from ledgersight.parsers import (
     check_pdftotext,
-    find_pdfs,
-    parse_statement,
     extract_text,
     file_hash,
+    find_pdfs,
+    parse_statement,
     validate_statement,
 )
-from ledgersight.business.periods import _fiscal_quarter_months
-from ledgersight.categorizer import TransactionCategorizer
-
-from ledgersight.business.report import build_report
 
 logger = logging.getLogger("ledgersight.business.cli")
 
@@ -187,7 +185,7 @@ Examples:
                 statements.append(stmt)
             else:
                 logger.warning("No transactions parsed from: %s", pdf_path)
-        except subprocess.CalledProcessError as exc:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, UnicodeError, ValueError) as exc:
             logger.error("Failed to parse %s: %s", pdf_path, exc)
             continue
 
@@ -232,18 +230,19 @@ Examples:
     if args.quarter and not target_year:
         fy_start = config.fiscal_year_start
         q_months = _fiscal_quarter_months(args.quarter, fy_start)
-        matching_years = sorted({
-            s.year for s in statements if s.month in q_months
+        from ledgersight.business.periods import statement_fiscal_year
+        matching_fys = sorted({
+            statement_fiscal_year(s, fy_start) for s in statements if s.month in q_months
         })
-        if not matching_years:
+        if not matching_fys:
             logger.error("No statements found for quarter %s.", args.quarter)
             sys.exit(1)
-        target_year = matching_years[-1]
-        if len(matching_years) > 1:
+        target_year = matching_fys[-1]
+        if len(matching_fys) > 1:
             logger.info(
                 "Note: --quarter without --year, using latest year %s "
                 "(found: %s). Use --year to override.",
-                target_year, matching_years,
+                target_year, matching_fys,
             )
 
     if args.output:

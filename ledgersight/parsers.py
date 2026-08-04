@@ -1,15 +1,16 @@
 """PDF bank statement parsing utilities."""
 from __future__ import annotations
+
 import hashlib
 import logging
 import re
 import subprocess
 import sys
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
-from ledgersight.constants import _ACTIVITY_SECTION_ENDINGS, _DEFAULT_CONFIG, MONEY_RE, RC_TOLERANCE
+from ledgersight.constants import _ACTIVITY_SECTION_ENDINGS, MONEY_RE, RC_TOLERANCE
 from ledgersight.models import Statement, Transaction
 
 logger = logging.getLogger("ledgersight.parsers")

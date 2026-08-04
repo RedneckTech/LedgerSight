@@ -1,5 +1,6 @@
 """CSV export utilities for audit, P&L, and CPA packages."""
 from __future__ import annotations
+
 import csv
 import logging
 from decimal import Decimal
@@ -170,7 +171,9 @@ class CSVExporter:
                         [[tx.post_date, redactor.description(tx.description), tx.business_category,
                           str(tx.amount), "Contribution" if tx.is_credit else "Draw"]
                          for s in self.statements for tx in s.transactions
-                         if tx.is_owner_related or tx.business_category in ("Owner Contribution", "Owner Draw or Distribution")])
+                          if tx.is_owner_related
+                          or tx.business_category in ("Owner Contribution",
+                                                      "Owner Draw or Distribution")])
 
         self._write_csv(output_dir / "cpa_uncategorized.csv",
                         ["Date", "Description", "Amount", "Type", "ReviewReason"],

@@ -2,11 +2,12 @@ import unittest
 from datetime import date
 
 from ledgersight.business.periods import (
-    _fiscal_quarter_months,
     fiscal_quarter_range,
     get_period_months,
     get_quarter_periods,
+    statement_fiscal_year,
 )
+from tests.conftest import make_stmt
 
 
 class TestFinancialPeriods(unittest.TestCase):
@@ -51,3 +52,13 @@ class TestFinancialPeriods(unittest.TestCase):
         start, end = fiscal_quarter_range(2025, 4, fiscal_year_start=2)
         self.assertEqual(start, date(2025, 11, 1))
         self.assertEqual(end, date(2026, 1, 31))
+
+    def test_statement_fiscal_year_with_october_start(self):
+        stmt_oct = make_stmt(statement_date="10/31/2025")
+        stmt_jan = make_stmt(statement_date="01/31/2026")
+        self.assertEqual(statement_fiscal_year(stmt_oct, 10), 2025)
+        self.assertEqual(statement_fiscal_year(stmt_jan, 10), 2025)
+
+    def test_statement_fiscal_year_with_calendar_start(self):
+        stmt = make_stmt(statement_date="06/30/2025")
+        self.assertEqual(statement_fiscal_year(stmt, 1), 2025)
