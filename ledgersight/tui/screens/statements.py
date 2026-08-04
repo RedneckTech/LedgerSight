@@ -58,19 +58,16 @@ class StatementsScreen(Screen[None]):
         if not isinstance(app, LedgerSightApp):
             return
 
+        import logging
+
+        from ledgersight.business.loader import load_statements
         from ledgersight.categorizer import TransactionCategorizer
         from ledgersight.config import load_config
         from ledgersight.constants import _DEFAULT_CONFIG
-        from ledgersight.parsers import check_pdftotext, extract_text, find_pdfs, parse_statement
+        from ledgersight.parsers import find_pdfs
         from ledgersight.reconciliation import reconcile_all
 
-        try:
-            check_pdftotext()
-        except SystemExit:
-            self.query_one("#stmt-summary", Label).update(
-                "Error: pdftotext not installed. Install poppler-utils."
-            )
-            return
+        logger = logging.getLogger("ledgersight.tui")
 
         data_dir = Path("data/business")
         if not data_dir.exists():
@@ -86,23 +83,14 @@ class StatementsScreen(Screen[None]):
 
         config = app.state.config
         if config is None:
-            config = load_config(Path(_DEFAULT_CONFIG))
+            config = load_config(Path(_DEFAULT_CONFIG), strict=True)
 
-        import logging
-        import subprocess
-        logger = logging.getLogger("ledgersight.tui")
-
-        statements = []
-        for pdf_path in pdfs:
-            self.query_one("#stmt-summary", Label).update(f"Parsing: {pdf_path.name}...")
-            try:
-                text = extract_text(pdf_path)
-                stmt = parse_statement(text, str(pdf_path))
-                if stmt.transactions:
-                    statements.append(stmt)
-            except subprocess.CalledProcessError as exc:
-                logger.error("Failed to parse %s: %s", pdf_path, exc)
-                continue
+        load_result = load_statements(pdfs)
+        statements = load_result.statements
+        for error in load_result.errors:
+            logger.error("%s", error)
+        for warning in load_result.warnings:
+            logger.warning("%s", warning)
 
         if config and config.custom_rules:
             categorizer = TransactionCategorizer(config.custom_rules, config.merchant_aliases)

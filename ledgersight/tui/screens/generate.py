@@ -110,8 +110,32 @@ class GenerateScreen(Screen[None]):
                 log.write("[green]Reconciliation complete[/green]")
             progress.update(progress=30)
 
-            output_path = Path(f"business_financial_report_{app.state.report_year or config.tax_year}.pdf")
+            base = f"business_financial_report_{app.state.report_year or config.tax_year}"
+            if app.state.report_month:
+                output_name = f"{base}-{app.state.report_month:02d}.pdf"
+            elif app.state.report_quarter:
+                output_name = f"{base}-FY{app.state.report_year}FQ{app.state.report_quarter}.pdf"
+            else:
+                output_name = f"{base}.pdf"
+            output_path = Path(output_name)
             app.state.output_path = output_path
+
+            if output_path.exists():
+                self.notify(
+                    f"Will overwrite: {output_path.name}",
+                    severity="warning",
+                    timeout=5,
+                )
+
+            period_info = (
+                f"year={app.state.report_year or config.tax_year}, "
+                f"mode={app.state.report_mode}"
+            )
+            if app.state.report_month:
+                period_info += f", month={app.state.report_month}"
+            elif app.state.report_quarter:
+                period_info += f", quarter=FQ{app.state.report_quarter}"
+            log.write(f"[bold]Generating report: {period_info}[/bold]")
 
             await asyncio.to_thread(
                 build_report,
@@ -127,11 +151,11 @@ class GenerateScreen(Screen[None]):
                 cpa_export_dir=Path(f"{output_path.stem}_cpa") if app.state.export_cpa else None,
                 do_projections=app.state.do_projections,
                 scenario=app.state.scenario,
-                mask_personal=False,
+                mask_personal=app.state.mask_personal,
                 allow_mismatch=False,
                 strict=False,
                 full_detail=True,
-                overwrite=True,
+                overwrite=False,
             )
 
             progress.update(progress=100)
@@ -139,7 +163,7 @@ class GenerateScreen(Screen[None]):
             log.write(f"[bold green]Report saved to: {output_path}[/bold green]")
             status_label.update(f"Complete — {output_path}")
 
-        except Exception as exc:
+        except BaseException as exc:
             log.write(f"[red]Error: {exc}[/red]")
             status_label.update(f"Error: {exc}")
         finally:
