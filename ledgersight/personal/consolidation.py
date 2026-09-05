@@ -186,7 +186,13 @@ def _dedupe(statements: list[Statement]) -> tuple[list[Transaction], list[Duplic
 
 
 def balance_asof(ledger: AccountLedger, on_date: datetime.date) -> Decimal:
-    """Reconstructed balance on a date from the earliest beginning balance."""
+    """Reconstructed balance on a date from the earliest beginning balance.
+
+    This is a day-level (end-of-date) series used by the charts and the
+    account summaries. It is NOT the per-transaction running balance, which
+    ``running_balance_map`` provides: when several transactions share a post
+    date, ``balance_asof`` reports the combined end-of-day value.
+    """
     is_card = ledger.account_type == "Credit Card"
     balance = ledger.statements[0].beginning_balance
     for tx in ledger.transactions:
@@ -197,6 +203,31 @@ def balance_asof(ledger: AccountLedger, on_date: datetime.date) -> Decimal:
         else:
             balance += tx.amount if tx.is_credit else -tx.amount
     return balance
+
+
+def running_balance_map(ledger: AccountLedger) -> dict[int, Decimal]:
+    """Balance after EACH transaction in the ledger's stable sequence.
+
+    The ledger's transaction order is the deduplicated, date-sorted stream
+    (``consolidate``), so same-date entries keep the order in which the
+    earliest statement printed them. Each transaction maps (by object id) to
+    the balance immediately after it was applied, which is what a bank's
+    per-row running balance means. ``Transaction`` is an eq-dataclass (not
+    hashable), so the map is keyed by identity, not value.
+    """
+    is_card = ledger.account_type == "Credit Card"
+    balances: dict[int, Decimal] = {}
+    if not ledger.transactions:
+        return balances
+    first = _to_date(ledger.transactions[0].post_date)
+    balance = balance_asof(ledger, first - datetime.timedelta(days=1))
+    for tx in ledger.transactions:
+        if is_card:
+            balance -= tx.amount if tx.is_credit else -tx.amount
+        else:
+            balance += tx.amount if tx.is_credit else -tx.amount
+        balances[id(tx)] = balance
+    return balances
 
 
 def _month_buckets(transactions: list[Transaction]) -> list[MonthActivity]:
