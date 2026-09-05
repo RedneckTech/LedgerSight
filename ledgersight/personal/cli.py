@@ -85,6 +85,13 @@ def main() -> None:
         action="store_true",
         help="Generate report even if reconciliation fails",
     )
+    parser.add_argument(
+        "--budget",
+        type=str,
+        default=None,
+        help="Path to a budget.yaml with monthly income/category budgets "
+        "(default: <directory>/budget.yaml when it exists)",
+    )
     args = parser.parse_args()
 
     pdf_files = _find_statement_pdfs(Path(args.directory))
@@ -157,6 +164,12 @@ def main() -> None:
         base = os.path.splitext(output)[0]
         transactions_csv_path = f"{base}_transactions.csv"
 
+    if args.budget:
+        budget_path = args.budget
+    else:
+        default_budget = os.path.join(args.directory, "budget.yaml")
+        budget_path = default_budget if os.path.exists(default_budget) else None
+
     generate_report(
         statements,
         output,
@@ -167,4 +180,5 @@ def main() -> None:
         mask_personal=args.mask,
         allow_mismatch=args.allow_mismatch,
         transactions_csv_path=transactions_csv_path,
+        budget_path=budget_path,
     )

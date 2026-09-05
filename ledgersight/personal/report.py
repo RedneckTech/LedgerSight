@@ -30,6 +30,19 @@ from ledgersight.personal.consolidation import (
     consolidate,
     missing_coverage,
 )
+from ledgersight.personal.insights import (
+    FORECAST_HORIZON_DAYS,
+    Budget,
+    budget_category_rows,
+    budget_month_rows,
+    build_forecast,
+    category_spend_totals,
+    dashboard_totals,
+    detect_repeating_payments,
+    estimate_income_groups,
+    load_budget,
+    month_series,
+)
 from ledgersight.personal.models import Statement, Transaction
 
 EXCLUDED_MERCHANT_CATS = {
@@ -579,6 +592,400 @@ def _spending_overview(
 
 
 # ---------------------------------------------------------------------------
+# Insights renderers (dashboard, budget, recurring, review, corrections)
+# ---------------------------------------------------------------------------
+
+
+def _cadence_label(days: int) -> str:
+    if days == 7:
+        return "weekly"
+    if days == 14:
+        return "every 2 weeks"
+    if 28 <= days <= 31:
+        return "monthly"
+    if 14 < days < 28:
+        return f"every {days} days"
+    if days == 60:
+        return "every 2 months"
+    if days == 91:
+        return "quarterly"
+    return f"every {days} days"
+
+
+def _render_dashboard(pdf: ReportPDF, result: ConsolidatedResult, start: date, end: date) -> None:
+    """One-page at-a-glance: headline totals and a month-by-month table."""
+    pdf.add_page()
+    pdf.section_title("Consolidated Dashboard")
+    totals = dashboard_totals(result, end)
+    metric_rows = [
+        ["Total Income", fmt_dollar(totals["income"])],
+        ["Total Spending", fmt_dollar(totals["spending"])],
+        ["Net (Income \u2212 Spending)", fmt_dollar(totals["income"] - totals["spending"])],
+        ["Cash & Savings (as of)", fmt_dollar(totals["cash"])],
+        ["Credit-Card Debt (as of)", fmt_dollar(totals["debt"])],
+    ]
+    pdf.draw_table(
+        ["Metric", "Amount"],
+        metric_rows,
+        col_widths=[70, 40],
+        col_aligns=["L", "R"],
+        row_font_size=8,
+        row_height=5.5,
+    )
+    pdf.body_text(
+        "\u201cIncome\u201d is Payroll, Deposit and Government credits. \u201cSpending\u201d is every debit "
+        "except internal transfers and loan/card payments. Cash & Savings and card debt are the "
+        f"balances as of {end:%B %d, %Y}.",
+        size=8,
+    )
+    pdf.ln(3)
+
+    pdf.sub_title("Month-by-Month")
+    month_rows: list[list[str]] = []
+    for (year, month), entry in month_series(result.ledgers).items():
+        net = entry["income"] - entry["spending"]
+        rate = ""
+        if entry["income"] > 0:
+            rate = f"{net / entry['income'] * 100:.1f}%"
+        month_rows.append(
+            [
+                f"{date(year, month, 1):%B %Y}",
+                fmt_dollar(entry["income"]),
+                fmt_dollar(entry["spending"]),
+                fmt_dollar(net),
+                rate,
+                fmt_dollar(entry["cash"]),
+                fmt_dollar(entry["debt"]),
+            ]
+        )
+    pdf.draw_table(
+        ["Month", "Income", "Spending", "Net", "Savings Rate", "Cash & Savings", "Card Debt"],
+        month_rows,
+        col_widths=[27, 27, 27, 26, 24, 28, 27],
+        col_aligns=["L", "R", "R", "R", "R", "R", "R"],
+        section_label="Dashboard",
+    )
+    pdf.body_text(
+        "Months outside the covered statements are omitted. Savings rate is blank when no income was "
+        "recorded that month (e.g. card-only months).",
+        size=8,
+    )
+
+
+def _paragraph_budget_template(pdf: ReportPDF) -> None:
+    pdf.body_text(
+        "No budget is currently configured, so budget-vs-actual is not shown. To enable it, create a "
+        "file named \u201cbudget.yaml\u201d in the report data folder (or pass --budget <path>) with "
+        "monthly amounts:",
+        size=8,
+    )
+    pdf.body_text_small(
+        "income_monthly: 0.00\n"
+        "categories:\n"
+        "  Fuel: 0.00\n"
+        "  Groceries: 0.00\n"
+        "  Rent: 0.00\n"
+        "  Restaurants: 0.00\n"
+        "  Shopping: 0.00\n"
+        "  Subscriptions: 0.00\n"
+        "  Utilities: 0.00\n"
+        "  # ... any category you want to track\n"
+        "spending_monthly: 0.00   # optional overall cap",
+        size=7,
+    )
+
+
+def _render_budget(
+    pdf: ReportPDF,
+    budget: Budget | None,
+    result: ConsolidatedResult,
+    start: date,
+    end: date,
+) -> None:
+    """Budget vs actual page. Shows guidance when no budget.yaml exists."""
+    pdf.add_page()
+    pdf.section_title("Budget vs Actual")
+    if budget is None or not budget.configured:
+        _paragraph_budget_template(pdf)
+        return
+    pdf.body_text(
+        f"Period: {start:%B %Y} through {end:%B %Y}. Budgets are monthly; the \u201cactual\u201d column "
+        "is total spending \u00f7 months covered so far.",
+        size=8,
+    )
+    spend = category_spend_totals(result.ledgers)
+    cat_rows = budget_category_rows(budget, spend, start, end)
+    rows: list[list[str]] = []
+    for r in cat_rows:
+        if r["budget"] > 0:
+            pct = f"{r['variance'] / r['budget'] * 100:+.1f}%"
+        else:
+            pct = "\u2014"
+        rows.append([r["category"], fmt_dollar(r["budget"]), fmt_dollar(r["average"]), fmt_dollar(r["variance"]), pct])
+    pdf.sub_title("Category \u2013 Monthly Budget vs Actual")
+    pdf.draw_table(
+        ["Category", "Monthly Budget", "Monthly Actual", "Over / Under", "% of Budget"],
+        rows,
+        col_widths=[48, 34, 34, 36, 34],
+        col_aligns=["L", "R", "R", "R", "R"],
+        section_label="Budget by Category",
+    )
+    pdf.ln(2)
+    pdf.sub_title("Month-by-Month Totals")
+    month_rows = [
+        [r["month"], fmt_dollar(r["budget"]), fmt_dollar(r["actual"]), "" if r["used"] is None else f"{r['used']}%"]
+        for r in budget_month_rows(budget, month_series(result.ledgers))
+    ]
+    pdf.draw_table(
+        ["Month", "Budget", "Actual", "% of Budget Used"],
+        month_rows,
+        col_widths=[40, 34, 34, 34],
+        col_aligns=["L", "R", "R", "R"],
+        section_label="Budget by Month",
+    )
+    if budget.income_monthly > 0:
+        inc_total = dashboard_totals(result, end)["income"]
+        months = max(1, (end.year - start.year) * 12 + (end.month - start.month) + 1)
+        pdf.body_text(
+            f"Planned income {fmt_dollar(budget.income_monthly)}/mo vs actual {fmt_dollar(inc_total / Decimal(months))}"
+            f"/mo over the covered period.",
+            size=8,
+        )
+
+
+def _render_recurring_and_forecast(pdf: ReportPDF, result: ConsolidatedResult, end: date) -> None:
+    """Detected recurring payments and a near-term cash forecast."""
+    pdf.add_page()
+    pdf.section_title("Recurring Payments & Forecast")
+    repeating = detect_repeating_payments(result.all_transactions)
+    if not repeating:
+        pdf.body_text(
+            "No recurring patterns were detected. Recurrence requires at least three occurrences of a "
+            "payment or income item on a consistent interval with a stable amount.",
+            size=9,
+        )
+        return
+    pdf.body_text(
+        "Recurring items are detected by grouping transactions by normalized merchant and requiring at "
+        "least three occurrences on a consistent interval (within 25% of the median, weekly to quarterly) "
+        "with a stable amount (within 10% or $2). Income = payroll/deposits; everything else is a bill.",
+        size=8,
+    )
+    pdf.ln(2)
+    pdf.sub_title("Detected Recurring Payments")
+    rep_rows = [
+        [
+            r.payee,
+            r.category,
+            "Income" if r.income else "Bill",
+            _cadence_label(r.cadence_days),
+            str(r.occurrences),
+            r.amount_range,
+            f"{r.last_date:%m/%d/%Y}",
+        ]
+        for r in repeating
+    ]
+    pdf.draw_table(
+        ["Payee", "Category", "Type", "Cadence", "# Times", "Typical Amount", "Last"],
+        rep_rows,
+        col_widths=[48, 20, 16, 24, 14, 34, 30],
+        col_aligns=["L", "L", "L", "L", "R", "R", "R"],
+        section_label="Recurring Payments",
+    )
+
+    cash = dashboard_totals(result, end)["cash"]
+    estimated = estimate_income_groups(result.all_transactions, end)
+    forecast = build_forecast(repeating, cash, end, estimated_income=estimated)
+    if forecast:
+        pdf.ln(2)
+        pdf.sub_title(f"Near-Term Cash Forecast (next {FORECAST_HORIZON_DAYS} days)")
+        pdf.body_text(
+            f"Starting from the checking + savings balance on {end:%B %d, %Y} "
+            f"({fmt_dollar(cash)}) and applying the detected recurring bills plus estimated variable "
+            "income (payroll/deposits that arrive on an irregular cadence) on the cadence observed over "
+            "the last ~9 weeks. Estimates only \u2013 schedules and amounts often change.",
+            size=8,
+        )
+        fc_rows = [
+            [
+                f"{e.event_date:%m/%d/%Y}",
+                e.payee,
+                "+" if e.income else "\u2212",
+                fmt_dollar(e.amount),
+                fmt_dollar(e.projected),
+            ]
+            for e in forecast
+        ]
+        pdf.draw_table(
+            ["Date", "Payee", "In/Out", "Amount", "Projected Cash"],
+            fc_rows,
+            col_widths=[20, 56, 16, 42, 52],
+            col_aligns=["L", "L", "C", "R", "R"],
+            section_label="Forecast",
+        )
+
+
+def _render_items_needing_review(pdf: ReportPDF, result: ConsolidatedResult, mask_personal: bool = False) -> None:
+    """Actionable list of transactions and statements that warrant manual review."""
+    pdf.add_page()
+    pdf.section_title("Items Needing Review")
+    rows: list[list[str]] = []
+
+    for ledger in result.ledgers:
+        for mismatch in _running_balance_mismatches(ledger):
+            rows.append(
+                [
+                    _ledger_short(ledger),
+                    mismatch[1],
+                    mismatch[2][:60],
+                    f"Printed balance {mismatch[3]} vs recomputed {mismatch[4]} on statement {mismatch[0]}",
+                ]
+            )
+
+    for ledger in result.ledgers:
+        for tx in ledger.transactions:
+            if tx.category != "Other":
+                continue
+            desc = _mask_desc(tx.description) if mask_personal else tx.description
+            rows.append(
+                [
+                    _ledger_short(ledger),
+                    tx.post_date,
+                    desc[:60],
+                    "Category not recognized \u2013 verify and recategorize",
+                ]
+            )
+
+    for ledger in result.ledgers:
+        for stmt in ledger.statements:
+            ok, _, _, _, _ = _statement_reconciles(stmt)
+            if not ok:
+                rows.append(
+                    [
+                        _ledger_short(ledger),
+                        stmt.statement_date,
+                        _period_note(stmt)[:60],
+                        "Statement printed totals/counts differ from parsed transactions",
+                    ]
+                )
+
+    for ledger in result.ledgers:
+        for issue in _date_sanity(ledger):
+            rows.append(
+                [_ledger_short(ledger), "\u2013", issue[:60], "Transaction post date outside its statement period"]
+            )
+
+    for movement in result.movements:
+        if movement.matched:
+            continue
+        from_ledger = result.ledger_for(movement.from_account)
+        label = _ledger_short(from_ledger) if from_ledger else movement.from_account
+        rows.append(
+            [
+                label,
+                movement.date,
+                movement.description[:60],
+                "Transfer/card payment with no offsetting credit on a covered account",
+            ]
+        )
+
+    if not rows:
+        pdf.body_text("No transactions or statements currently require manual review.", size=9)
+        return
+    pdf.body_text(
+        f"{len(rows)} item(s) found. Items surfaced automatically \u2013 confirm each one against the "
+        "original statement before changing anything.",
+        size=8,
+    )
+    pdf.draw_table(
+        ["Account", "Date", "Item", "Finding"],
+        rows,
+        col_widths=[32, 22, 52, 80],
+        col_aligns=["L", "L", "L", "L"],
+        section_label="Items Needing Review",
+    )
+
+
+def _render_corrections_log(pdf: ReportPDF, result: ConsolidatedResult, mask_personal: bool = False) -> None:
+    """Chronological log of data-quality findings and the adjustments applied."""
+    pdf.add_page()
+    pdf.section_title("Corrections & Adjustments Log")
+    entries: list[list[str]] = []
+
+    for ledger in result.ledgers:
+        for check in ledger.checks:
+            if check.ok:
+                continue
+            entries.append(
+                [
+                    check.statement_date,
+                    _ledger_short(ledger),
+                    "Ending balance",
+                    f"Printed {fmt_dollar(check.expected)} vs recomputed {fmt_dollar(check.computed)}",
+                    "Recomputed balance used for tables, charts and totals",
+                ]
+            )
+
+    for ledger in result.ledgers:
+        for mismatch in _running_balance_mismatches(ledger):
+            entries.append(
+                [
+                    mismatch[1],
+                    _ledger_short(ledger),
+                    "Running balance",
+                    f"{mismatch[2][:44]} \u2013 printed {mismatch[3]} vs recomputed {mismatch[4]}",
+                    "Balance column shows the recomputed value; printed kept in audit CSV",
+                ]
+            )
+
+    for ledger in result.ledgers:
+        for dup in ledger.duplicates:
+            desc = _mask_desc(dup.transaction.description) if mask_personal else dup.transaction.description
+            entries.append(
+                [
+                    dup.transaction.post_date,
+                    _ledger_short(ledger),
+                    "Duplicate row",
+                    desc[:50],
+                    "Removed (earliest overlapping statement already lists this transaction)",
+                ]
+            )
+
+    for ledger in result.ledgers:
+        for stmt in ledger.statements:
+            ok, _, _, _, _ = _statement_reconciles(stmt)
+            if not ok:
+                entries.append(
+                    [
+                        stmt.statement_date,
+                        _ledger_short(ledger),
+                        "Statement arithmetic",
+                        "Printed credits/debits or counts differ from parsed values",
+                        "Parsed transaction stream treated as authoritative",
+                    ]
+                )
+
+    if not entries:
+        pdf.body_text("No corrections or adjustments were applied while building this report.", size=9)
+        return
+
+    pdf.body_text(
+        "This report reconstructs balances and totals from the parsed transaction stream. When a "
+        "statement disagrees, the recomputed (corrected) value is used and the discrepancy is logged "
+        "here so every adjustment has provenance.",
+        size=8,
+    )
+    entries.sort(key=lambda r: r[0])
+    pdf.draw_table(
+        ["Date", "Account", "Type", "Finding", "Action Taken"],
+        entries,
+        col_widths=[22, 30, 24, 54, 56],
+        col_aligns=["L", "L", "L", "L", "L"],
+        section_label="Corrections & Adjustments",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Report generation
 # ---------------------------------------------------------------------------
 
@@ -593,6 +1000,7 @@ def generate_report(
     mask_personal: bool = False,
     allow_mismatch: bool = False,
     transactions_csv_path: str | Path | None = None,
+    budget_path: str | Path | None = None,
 ) -> None:
     """Generate the personal financial report PDF (and optional audit CSV)."""
     pdf = ReportPDF("Personal Financial Report")
@@ -784,6 +1192,9 @@ def generate_report(
 
     # ---- PERIOD OVERVIEW CHARTS ----
     if mode in ("combined", "yearly"):
+        _render_dashboard(pdf, result, cover_start_d, cover_end_d)
+        _render_budget(pdf, load_budget(budget_path), result, cover_start_d, cover_end_d)
+
         aggregated = _merge_ledgers_by_month(result.ledgers)
         period_label = f"{cover_start_d:%B %Y} \u2013 {cover_end_d:%B %Y}"
 
@@ -844,8 +1255,14 @@ def generate_report(
             section_label="Top Payees by Total Debits",
         )
 
+    # ---- INSIGHTS: REVIEW + RECURRING/FORECAST ----
+    if mode in ("combined", "yearly"):
+        _render_items_needing_review(pdf, result, mask_personal=mask_personal)
+        _render_recurring_and_forecast(pdf, result, cover_end_d)
+
     # ---- RECONCILIATION PANEL ----
     _render_reconciliation(pdf, result, period_end_year, period_end_month, mask_personal=mask_personal)
+    _render_corrections_log(pdf, result, mask_personal=mask_personal)
 
     # ---- MONTHLY DETAIL ----
     if mode in ("combined", "monthly"):
