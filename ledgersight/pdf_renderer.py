@@ -329,12 +329,10 @@ class ReportPDF(FPDF):
             return
         pw, ph = _png_size(buf)
         img_h = (w * ph / pw) if (pw and ph) else w * 0.5
-        available = (self.h - self.b_margin) - self.get_y() - 14
+        available = (self.h - self.b_margin) - self.get_y() - 16
         if img_h > available and available > 12:
             w = max(w * available / img_h, 20)
             img_h = available
-        if self.get_y() + img_h > self.h - 25 - 14:
-            self.add_page()
         self.image(buf, x=self.l_margin, w=w)
         self.ln(2)
         self.set_font(self.body_font, "I", 7)
