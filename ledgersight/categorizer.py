@@ -516,6 +516,14 @@ def normalize_merchant(description: str) -> str:
     desc = re.sub(r"\b\d{8,}\b", "", desc)
     desc = re.sub(r"\s+[A-Z]{2}\s+\d{5}(?:-\d{4})?", "", desc)
     desc = re.sub(r"\b([A-Za-z]{4,})\d{1,2}\b", r"\1", desc)
+    # pdftotext column bleed: trailing masked-card / zip fragments
+    desc = re.sub(r"\s+XX\d{4}\s*$", "", desc)
+    desc = re.sub(r"\s+\d{5,6}\s*$", "", desc)
+    # leading bleed tokens before a real merchant name (e.g. "ADA0 ALLIANT")
+    desc = re.sub(r"^\d{1,7}\s+", "", desc)
+    desc = re.sub(r"^[A-Z]{2,6}\d{1,2}\s+(?=[A-Z][A-Z .#&-]{2,})", "", desc)
+    # a stray digit glued to the last word (SUN8, MAYFIELD VLG0)
+    desc = re.sub(r"\b([A-Za-z]{2,})\d+\b", r"\1", desc)
     desc = re.sub(r"\s+", " ", desc).strip()
     if not desc:
         desc = description[:80]

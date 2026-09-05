@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
 from ledgersight.personal.categorizer import CATEGORY_COLORS
+from ledgersight.personal.consolidation import AccountLedger
 from ledgersight.personal.models import Statement
 
 
@@ -232,6 +233,144 @@ def chart_daily_balance_single(stmt: Statement) -> io.BytesIO:
     plt.close(fig)
     buf.seek(0)
     return buf
+
+
+def chart_weekly_balance_ledgers(ledgers: list[AccountLedger]) -> io.BytesIO:
+    """Weekly average balance reconstructed after deduplicating overlaps.
+
+    The daily balance of every account is rebuilt from its earliest statement
+    start, so overlapping statement windows are not double-counted.
+    """
+    from datetime import date, timedelta
+
+    from ledgersight.personal.consolidation import _to_date, balance_asof
+
+    if not ledgers:
+        return _empty_png_buf("No ledger data")
+
+    combined: dict[date, float] = {}
+    for ledger in ledgers:
+        if not ledger.transactions:
+            continue
+        d0 = _to_date(ledger.first_tx_date)
+        d1 = _to_date(ledger.as_of or ledger.last_tx_date)
+        day = d0
+        while day <= d1:
+            combined[day] = combined.get(day, 0.0) + float(balance_asof(ledger, day))
+            day += timedelta(days=1)
+
+    if not combined:
+        return _empty_png_buf("No daily balance data")
+
+    week_bals: dict[tuple[int, int], list[float]] = defaultdict(list)
+    for day, bal in sorted(combined.items()):
+        iso = day.isocalendar()
+        week_bals[(iso[0], iso[1])].append(bal)
+
+    points = sorted((k, sum(bals) / len(bals)) for k, bals in week_bals.items())
+    positions = list(range(len(points)))
+    balances = [p[1] for p in points]
+    x_labels = [f"{y}-W{wk:02d}" for y, wk in [p[0] for p in points]]
+
+    fig, ax = plt.subplots(figsize=(12, 7))
+    ax.plot(
+        positions,
+        balances,
+        color="#2c3e50",
+        linewidth=1.6,
+        marker="o",
+        markersize=3,
+        alpha=0.85,
+    )
+    ax.fill_between(positions, 0, balances, alpha=0.08, color="#2c3e50")
+    ax.axhline(y=0, color="#e74c3c", linewidth=0.5, linestyle="--", alpha=0.5)
+    step = max(1, len(positions) // 15)
+    shown_positions = positions[::step]
+    ax.set_xticks(shown_positions)
+    ax.set_xticklabels(
+        [x_labels[i] for i in shown_positions],
+        rotation=45,
+        ha="right",
+        fontsize=8,
+    )
+    ax.set_ylabel("Average Weekly Balance ($)", fontsize=9)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
+    ax.set_title("Weekly Average Balance \u2013 All Covered Accounts", fontsize=11, fontweight="bold")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.set_xlim(-0.5, len(points) - 0.5)
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def chart_daily_balance_ledger_month(ledger: AccountLedger, year: int, month: int) -> io.BytesIO:
+    """Daily balance line chart for a single account during a calendar month."""
+    from datetime import date, timedelta
+
+    from ledgersight.personal.consolidation import _to_date, balance_asof
+
+    if not ledger.transactions:
+        return _empty_png_buf("No daily balance data")
+
+    start = date(year, month, 1)
+    if month == 12:
+        end = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        end = date(year, month + 1, 1) - timedelta(days=1)
+    as_of = _to_date(ledger.as_of or ledger.last_tx_date)
+    last_day = min(end, as_of)
+
+    day = start
+    date_objs: list[date] = []
+    balances: list[float] = []
+    while day <= last_day:
+        date_objs.append(day)
+        balances.append(float(balance_asof(ledger, day)))
+        day += timedelta(days=1)
+    if not date_objs:
+        return _empty_png_buf("No data for this month")
+
+    date_nums = mdates.date2num(date_objs)
+    fig, ax = plt.subplots(figsize=(9, 2.1))
+    ax.plot(
+        date_nums,
+        balances,
+        color="#2c3e50",
+        linewidth=1.4,
+        marker="o",
+        markersize=3,
+        alpha=0.85,
+    )
+    ax.fill_between(date_nums, 0, balances, alpha=0.08, color="#2c3e50")
+    ax.axhline(y=0, color="#e74c3c", linewidth=0.5, linestyle="--", alpha=0.5)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
+    ax.set_ylabel("Balance ($)", fontsize=9)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
+    ax.set_title(
+        f"Daily Balance \u2013 {datetime(year, month, 1):%B %Y} \u2013 {_label(ledger)}",
+        fontsize=11,
+        fontweight="bold",
+    )
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    fig.autofmt_xdate(rotation=30, ha="right")
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _label(ledger: AccountLedger) -> str:
+    inst = ledger.institution or "Account"
+    return f"{inst} ****{ledger.account_number[-4:]}" if ledger.account_number else inst
 
 
 def chart_category_by_month(statements: list[Statement]) -> io.BytesIO:

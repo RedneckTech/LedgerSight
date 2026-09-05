@@ -77,6 +77,7 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
     total_debits = Decimal("0")
     credit_count = 0
     debit_count = 0
+    period_start = ""
 
     in_summary = False
     for line in lines:
@@ -89,6 +90,9 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
             m = re.search(r"\$[\d,]+\.\d{2}", line)
             if m:
                 beginning_balance = parse_amount(m.group())
+            m_start = re.search(r"(\d{2}/\d{2}/\d{4})\s+Beginn", line)
+            if m_start:
+                period_start = m_start.group(1)
         elif "Credit" in line and "This Period" in line:
             m = re.search(r"(\d+)\s+Credit", line)
             if m:
@@ -115,6 +119,7 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
     activity_started = False
     header_positions: dict[str, int] = {}
     desc_buffer: list[str] = []
+    drain_to_misc = False
 
     for line in lines:
         if "Account Activity" in line and not activity_started:
@@ -218,14 +223,24 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
                     balance=balance,
                 )
             )
+            # Rows whose description column stayed empty or only holds the
+            # placeholder 'MISCELLANEOUS DEBIT' print their real detail on
+            # the lines that FOLLOW the dated row, so drain those lines into
+            # this transaction instead of leaving them for the next row.
+            drain_to_misc = not description or description == "MISCELLANEOUS DEBIT"
         else:
             stripped = line.strip()
             if stripped and not _is_page_artifact(line, stripped):
-                desc_buffer.append(stripped)
+                if drain_to_misc and transactions:
+                    tx = transactions[-1]
+                    tx.description = _clean_description(f"{tx.description} {stripped}")
+                else:
+                    desc_buffer.append(stripped)
 
     # ---- Checks Cleared ----
     checks: list[dict] = []
     in_checks = False
+    check_row = re.compile(r"(\d+)\*?\s+(\d{2}/\d{2}/\d{4})\s+\$([\d,]+\.\d{2})")
     for line in lines:
         if "Checks Cleared" in line:
             in_checks = True
@@ -234,8 +249,7 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
             continue
         if "Daily Balances" in line:
             break
-        m = re.match(r"\s*(\d+)\s+(\d{2}/\d{2}/\d{4})\s+\$([\d,]+\.\d{2})", line)
-        if m:
+        for m in check_row.finditer(line):
             checks.append(
                 {
                     "number": int(m.group(1)),
@@ -274,6 +288,7 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
 
     return Statement(
         statement_date=statement_date,
+        period_start=period_start,
         account_number=account_number,
         beginning_balance=beginning_balance,
         ending_balance=ending_balance,
@@ -305,9 +320,16 @@ def _parse_card_date(date_str: str) -> str:
     return parsed.strftime("%m/%d/%Y")
 
 
-def _card_post_date(post_date: str, year: int) -> str:
-    """Convert a card row date like 'Jun 22' to '06/22/<year>'."""
+def _card_post_date_for(post_date: str, year: int, statement_month: int) -> str:
+    """Convert a card row date like 'Jun 22' to '06/22/<year>'.
+
+    A statement closing in January may list transactions from the prior
+    December, so when the transaction month falls after the statement
+    closing month the transaction belongs to the previous year.
+    """
     parsed = datetime.strptime(post_date.strip(), "%b %d")
+    if parsed.month > statement_month:
+        year -= 1
     return parsed.replace(year=year).strftime("%m/%d/%Y")
 
 
@@ -394,13 +416,14 @@ def parse_capone_statement(text: str, file_path: str = "") -> Statement:
 
     creds, purch = load_card_transactions(text)
     stmt_year = int(statement_date.split("/")[2])
+    stmt_month = int(statement_date.split("/")[0])
 
     # Build the full chronological transaction list (with running balance).
     transactions: list[Transaction] = []
     for row in creds:
         transactions.append(
             Transaction(
-                post_date=_card_post_date(row["post_date"], stmt_year),
+                post_date=_card_post_date_for(row["post_date"], stmt_year, stmt_month),
                 description=row["description"],
                 amount=row["amount"],
                 is_credit=True,
@@ -410,7 +433,7 @@ def parse_capone_statement(text: str, file_path: str = "") -> Statement:
     for row in purch:
         transactions.append(
             Transaction(
-                post_date=_card_post_date(row["post_date"], stmt_year),
+                post_date=_card_post_date_for(row["post_date"], stmt_year, stmt_month),
                 description=row["description"],
                 amount=row["amount"],
                 is_credit=False,
@@ -479,6 +502,7 @@ def parse_capone_statement(text: str, file_path: str = "") -> Statement:
         account_type="Credit Card",
         institution="Capital One",
         file_path=file_path,
+        period_start="",
     )
 
 

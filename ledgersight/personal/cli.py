@@ -71,6 +71,11 @@ def main() -> None:
         help="Write an audit CSV with every transaction and its category",
     )
     parser.add_argument(
+        "--csv",
+        action="store_true",
+        help="Write a consolidated, deduplicated transactions CSV (one row per transaction)",
+    )
+    parser.add_argument(
         "--mask",
         action="store_true",
         help="Redact personal names and addresses in output",
@@ -147,6 +152,11 @@ def main() -> None:
         base = os.path.splitext(output)[0]
         audit_path = f"{base}_audit.csv"
 
+    transactions_csv_path = None
+    if args.csv:
+        base = os.path.splitext(output)[0]
+        transactions_csv_path = f"{base}_transactions.csv"
+
     generate_report(
         statements,
         output,
@@ -156,4 +166,5 @@ def main() -> None:
         audit_path=audit_path,
         mask_personal=args.mask,
         allow_mismatch=args.allow_mismatch,
+        transactions_csv_path=transactions_csv_path,
     )

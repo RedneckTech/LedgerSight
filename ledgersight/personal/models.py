@@ -23,7 +23,7 @@ class Transaction:
 class Statement:
     """Parsed personal bank statement."""
 
-    statement_date: str  # MM/DD/YYYY
+    statement_date: str  # MM/DD/YYYY (period end)
     account_number: str
     beginning_balance: Decimal
     ending_balance: Decimal
@@ -41,6 +41,7 @@ class Statement:
     account_type: str = ""  # "Checking", "Savings", "Credit Card"
     institution: str = ""
     file_path: str = ""
+    period_start: str = ""  # MM/DD/YYYY (period begin), when the statement states it
 
     @property
     def month(self) -> int:
