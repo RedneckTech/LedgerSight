@@ -105,6 +105,57 @@ ledgersight --cli --help
 ./dev_run.sh --install   # Reinstall in dev mode
 ```
 
+### Personal profile (bank + credit-card statements)
+
+The personal profile consolidates First Interstate checking/savings and
+Capital One card statement PDFs into one audited report: per-account monthly
+ledgers with recomputed running balances, a consolidated dashboard, recurring
+payments and a 91-day cash forecast, items needing review, and a corrections
+log with source-file provenance.
+
+```bash
+# Full report for 2026 from every PDF under data/Personal (searched recursively)
+ledgersight --cli --profile personal -d data/Personal --year 2026 --mode combined \
+    --audit --csv -o data/Personal/personal_financial_report.pdf
+```
+
+- `--audit` writes `<report>_audit.csv`: every parsed row with the bank-printed
+  balance (`Balance`) and the report's recomputed running balance (`Running`).
+- `--csv` writes `<report>_transactions.csv`: the deduplicated ledger, one row
+  per transaction, with running balances.
+- Both CSVs are also embedded in the PDF as file attachments.
+- `--budget <path>` enables the Budget vs Actual page (defaults to
+  `<directory>/budget.yaml` when that file exists).
+
+After rendering, the CLI runs export checks (all table rows drawn, nothing past
+the footer, credit decomposition sums to total credits, monthly series sums to
+the dashboard totals, every ledger transaction bucketed and given a running
+balance) and prints `Export checks: PASSED` or lists each failure on stderr.
+
+#### budget.yaml schema
+
+```yaml
+# All amounts are US dollars per calendar month. 0.00 ignores an item;
+# delete the file to disable the page entirely.
+income_monthly: 4200.00        # expected earned income (Payroll + Deposit categories)
+
+categories:                    # monthly caps per spending category
+  Fuel: 600.00
+  Groceries: 450.00
+  Rent: 1200.00
+  Subscriptions: 60.00
+  # any category the categorizer produces may be listed:
+  # Auto Care, Bank Fees, Checks, Fuel, Government, Groceries, Insurance,
+  # Interest, Rent, Restaurants, Shopping, Subscriptions, Utilities
+
+spending_monthly: 0.00         # optional overall cap; 0.00 = sum of the categories above
+```
+
+"Actual" on the budget page is the unified spending figure used everywhere in
+the report: every debit except internal transfers and loan/card payments
+(uncategorized items are included). "Income" is earned income - Payroll,
+Deposit and Government credits with refunds excluded.
+
 ## Configuration
 
 Reports are driven by a TOML config file (`business_report.toml` by default). Generate a template:

@@ -13,10 +13,13 @@ from ledgersight.personal.insights import (
     budget_category_rows,
     budget_month_rows,
     build_forecast,
+    canon_merchant,
     category_spend_totals,
     dashboard_totals,
     detect_repeating_payments,
     estimate_income_groups,
+    is_refund,
+    is_spending,
     load_budget,
     month_series,
 )
@@ -184,6 +187,93 @@ class TestDetectRepeatingPayments(unittest.TestCase):
         self.assertNotIn("MISC STORE", payees)
 
 
+class TestRefundHandling(unittest.TestCase):
+    def test_refund_excluded_from_income(self) -> None:
+        stmts = [
+            make_stmt(
+                "01/31/2026",
+                "XXXXXXXXXXX1234",
+                "1000.00",
+                "3700.00",
+                [
+                    make_tx("01/02/2026", "RICHERS TRUCKING PAYROLL", "2000.00", True, "3000.00", "Payroll"),
+                    make_tx("01/10/2026", "REFUNDED SECURITY DEPOSIT", "300.00", True, "3300.00", "Deposit"),
+                    make_tx("01/15/2026", "WAL-MART STORE", "100.00", False, "3200.00", "Shopping"),
+                    make_tx("01/20/2026", "TRANSFER FROM SAVINGS", "500.00", True, "3700.00", "Transfers"),
+                ],
+            )
+        ]
+        result = consolidate(stmts)
+        series = month_series(result.ledgers)
+        totals = dashboard_totals(result, datetime.date(2026, 1, 31))
+        self.assertEqual(series[(2026, 1)]["income"], Decimal("2000.00"))
+        self.assertEqual(series[(2026, 1)]["refunds"], Decimal("300.00"))
+        self.assertEqual(totals["income"], Decimal("2000.00"))
+        self.assertEqual(totals["income_credits"], Decimal("2300.00"))
+        self.assertEqual(totals["refunds"], Decimal("300.00"))
+        self.assertEqual(totals["spending"], Decimal("100.00"))
+        self.assertTrue(is_refund(make_tx("01/10/2026", "REFUNDED SECURITY DEPOSIT", "300.00", True, "0.00")))
+
+    def test_unified_spending_definition(self) -> None:
+        stmts = [
+            make_stmt(
+                "01/31/2026",
+                "XXXXXXXXXXX1234",
+                "1000.00",
+                "500.00",
+                [
+                    make_tx("01/05/2026", "CAPITAL ONE AUTOPAY PYMT", "200.00", False, "800.00", "Loan/Credit Payment"),
+                    make_tx("01/10/2026", "TRANSFER TO CHECKING", "150.00", False, "650.00", "Transfers"),
+                    make_tx("01/15/2026", "UNCATEGORIZED STORE", "150.00", False, "500.00", "Other"),
+                ],
+            )
+        ]
+        result = consolidate(stmts)
+        totals = dashboard_totals(result, datetime.date(2026, 1, 31))
+        self.assertEqual(totals["spending"], Decimal("150.00"))
+        self.assertFalse(is_spending(make_tx("01/05/2026", "TRANSFER", "1.00", False, "0.00", "Transfers")))
+        self.assertFalse(is_spending(make_tx("01/05/2026", "AUTOPAY", "1.00", False, "0.00", "Loan/Credit Payment")))
+        self.assertTrue(is_spending(make_tx("01/05/2026", "STORE", "1.00", False, "0.00", "Other")))
+
+
+class TestCanonMerchant(unittest.TestCase):
+    def test_payment_rail_tokens_are_merged(self) -> None:
+        self.assertEqual(
+            canon_merchant("PAYPAL INST XFER HIDIVE 1234567"),
+            canon_merchant("PAYPAL PURCHASE HIDIVE 7654321"),
+        )
+
+    def test_rail_change_stays_one_payee(self) -> None:
+        tx = [
+            make_tx("06/05/2026", "PAYPAL INST XFER HIDIVE 1234567", "12.99", False, "2987.01", "Subscriptions"),
+            make_tx("07/05/2026", "PAYPAL INST XFER HIDIVE 1234567", "12.99", False, "2974.02", "Subscriptions"),
+            make_tx("08/05/2026", "PAYPAL PURCHASE HIDIVE 7654321", "12.99", False, "2961.03", "Subscriptions"),
+        ]
+        found = detect_repeating_payments(tx)
+        self.assertEqual(len(found), 1)
+        self.assertIn("HIDIVE", found[0].payee)
+        self.assertEqual(found[0].occurrences, 3)
+
+
+class TestActiveRecurring(unittest.TestCase):
+    def test_inactive_excluded_from_forecast(self) -> None:
+        stale = _rp("STALE GYM", False, 14, "40.00", "40.00", datetime.date(2026, 1, 1), active=False)
+        netflix = _rp("NETFLIX.COM", False, 29, "15.49", "15.49", datetime.date(2026, 3, 5), active=True)
+        events = build_forecast([stale, netflix], Decimal("1000.00"), datetime.date(2026, 3, 31))
+        self.assertTrue(all(e.payee != "STALE GYM" for e in events))
+
+    def test_long_cadence_marked_needs_confirm(self) -> None:
+        tx = [
+            make_tx("03/25/2026", "CHATGPT SUBSCRIPTION", "20.00", False, "1000.00", "Subscriptions"),
+            make_tx("06/08/2026", "CHATGPT SUBSCRIPTION", "20.00", False, "1000.00", "Subscriptions"),
+            make_tx("08/22/2026", "CHATGPT SUBSCRIPTION", "20.00", False, "1000.00", "Subscriptions"),
+        ]
+        found = detect_repeating_payments(tx, as_of=datetime.date(2026, 8, 28))
+        self.assertEqual(len(found), 1)
+        self.assertTrue(found[0].needs_confirm)
+        self.assertTrue(found[0].active)
+
+
 class TestEstimateIncome(unittest.TestCase):
     def test_estimates_next_variable_income(self) -> None:
         tx = [
@@ -231,8 +321,9 @@ class TestBuildForecast(unittest.TestCase):
             estimated_income=[_ei("RICHERS TRUCKING PAYROLL", datetime.date(2026, 4, 4), Decimal("900.00"))],
         )
         est = [e for e in events if e.payee.endswith("estimated")]
-        self.assertEqual(len(est), 1)
+        self.assertGreaterEqual(len(est), 10)
         self.assertEqual(est[0].event_date, datetime.date(2026, 4, 4))
+        self.assertEqual(est[1].event_date, datetime.date(2026, 4, 11))
         self.assertEqual(est[0].projected, Decimal("3884.51"))
 
 
@@ -243,6 +334,8 @@ def _rp(
     lo: str,
     hi: str,
     last: datetime.date,
+    active: bool = True,
+    needs_confirm: bool = False,
 ):
     from ledgersight.personal.insights import RepeatingPayment
 
@@ -258,6 +351,8 @@ def _rp(
         start_date=datetime.date(2026, 1, 1),
         last_date=last,
         occurrences=4,
+        active=active,
+        needs_confirm=needs_confirm,
     )
 
 

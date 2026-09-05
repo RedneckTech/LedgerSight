@@ -73,6 +73,12 @@ class ReportPDF(FPDF):
         self.generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
         self.header_extra: str = ""
         self.chart_note: str = ""
+        # Render accounting: every table row handed to draw_table must be
+        # drawn, and every drawn row must end above the footer line. The
+        # report's export checks read these after rendering.
+        self.table_rows_requested: int = 0
+        self.table_rows_drawn: int = 0
+        self.render_problems: list[str] = []
         self.set_auto_page_break(auto=True, margin=18)
         self.set_margins(12, 12, 12)
         self._use_dejavu = False
@@ -138,13 +144,13 @@ class ReportPDF(FPDF):
         self.cell(0, 6, text, new_x="LMARGIN", new_y="NEXT")
         self.ln(2)
 
-    def body_text(self, text: str, size: int = 9):
+    def body_text(self, text: str, size: int | float = 9):
         self.set_font(self.body_font, "", size)
         self.set_text_color(50, 50, 50)
         self.multi_cell(0, 4.5, text)
         self.ln(1)
 
-    def body_text_small(self, text: str, size: int = 7):
+    def body_text_small(self, text: str, size: int | float = 7):
         self.set_font(self.body_font, "", size)
         self.set_text_color(80, 80, 80)
         self.multi_cell(0, 3.5, text)
@@ -158,6 +164,46 @@ class ReportPDF(FPDF):
         while len(text) > 3 and self.get_string_width(text + ellipsis) > width_mm:
             text = text[:-1]
         return text + ellipsis
+
+    def _wrap_cell(self, text: str, width_mm: float, font_size: float) -> list[str]:
+        """Break one cell into display lines that fit a column width.
+
+        Explicit newlines are honoured, then long lines are word-wrapped by
+        measured string width. This is the single source of truth for how tall
+        a row is, so pagination (``_draw_table_paginated``) and drawing
+        (``_draw_table_section``) can never disagree about how many rows fit.
+        """
+        self.set_font(self.body_font, "", font_size)
+        lines: list[str] = []
+        for hard_line in text.split("\n"):
+            words = hard_line.split(" ")
+            if not words or all(not w for w in words):
+                lines.append("")
+                continue
+            current = ""
+            for word in words:
+                if not word:
+                    continue
+                trial = f"{current} {word}".strip()
+                if current and self.get_string_width(trial) <= width_mm:
+                    current = trial
+                    continue
+                if not current:
+                    remaining = word
+                    while remaining and self.get_string_width(remaining) > width_mm:
+                        # Estimate how many characters fit, then shrink until the
+                        # chunk really does fit so nothing has to be truncated.
+                        cut = max(1, int(len(remaining) / max(self.get_string_width(remaining) / width_mm, 1.0)))
+                        while cut > 1 and self.get_string_width(remaining[:cut]) > width_mm:
+                            cut -= 1
+                        lines.append(remaining[:cut])
+                        remaining = remaining[cut:]
+                    current = remaining
+                else:
+                    lines.append(current)
+                    current = word
+            lines.append(current)
+        return lines or [""]
 
     def draw_table(
         self,
@@ -176,6 +222,10 @@ class ReportPDF(FPDF):
             col_widths = [usable / len(headers)] * len(headers)
         if col_aligns is None:
             col_aligns = ["L"] * len(headers)
+        bad = [len(r) for r in rows if len(r) != len(headers)]
+        if bad:
+            label = section_label or headers[0]
+            raise ValueError(f"draw_table '{label}': rows have {bad[0]} cells but there are {len(headers)} headers")
 
         auto_break = self.auto_page_break
         self.set_auto_page_break(auto=False)
@@ -207,62 +257,47 @@ class ReportPDF(FPDF):
         row_height: float,
     ):
         header_h = 6
-        min_body_rows = 2
-        header_space = header_h + min_body_rows * row_height + 4
-
-        total_space = header_h + len(rows) * row_height + 4
-        if self.get_y() + total_space <= self.h - self.b_margin:
-            self._draw_table_section(
-                headers,
-                rows,
-                col_widths,
-                col_aligns,
-                header_color,
-                header_font_size,
-                row_font_size,
-                row_height,
-            )
+        cont_h = 5 if section_label else 0
+        # Content must stop above the auto page-break line so rows can never
+        # collide with the footer or vanish past the bottom of the page.
+        content_bottom = self.h - 18
+        if not rows:
             return
-        if self.get_y() + header_space > self.h - self.b_margin:
-            self.add_page()
+        self.table_rows_requested += len(rows)
+        heights = []
+        for row in rows:
+            line_counts = [len(self._wrap_cell(str(c), col_widths[i], row_font_size)) for i, c in enumerate(row)]
+            heights.append(max(line_counts, default=1) * row_height)
 
-        remaining = list(rows)
-        first_page = True
-        while remaining:
-            available_space = self.h - self.b_margin - self.get_y() - header_h
-            take: list[list[str]] = []
-            used = 0.0
-            for row in remaining:
-                rh = max((str(c).count("\n") + 1 for c in row), default=1) * row_height
-                if used + rh <= available_space:
-                    take.append(row)
-                    used += rh
-                else:
-                    break
-            if not take:
+        i = 0
+        first = True
+        while i < len(rows):
+            if not first:
                 self.add_page()
-                available_space = self.h - self.b_margin - self.get_y() - header_h
-                for row in remaining:
-                    rh = max((str(c).count("\n") + 1 for c in row), default=1) * row_height
-                    if used + rh <= available_space:
-                        take.append(row)
-                        used += rh
-                    else:
-                        break
+            if first:
+                if self.get_y() + header_h + heights[i] > content_bottom:
+                    self.add_page()
+            elif section_label and self.get_y() + cont_h + header_h + heights[i] > content_bottom:
+                self.add_page()
+            extra = header_h if first else (header_h + (cont_h if section_label else 0))
+            take: list[int] = []
+            cur = i
+            used = 0.0
+            while cur < len(rows) and self.get_y() + extra + used + heights[cur] <= content_bottom:
+                take.append(cur)
+                used += heights[cur]
+                cur += 1
             if not take:
-                take = [remaining[0]]
-            chunk = take
-            remaining = remaining[len(take) :]
-
-            if not first_page and section_label:
+                take = [i]
+                cur = i + 1
+            if not first and section_label:
                 self.set_font(self.body_font, "I", 7)
                 self.set_text_color(100, 100, 100)
                 self.cell(0, 4, f"{section_label} (continued)", new_x="LMARGIN", new_y="NEXT")
                 self.ln(1)
-
             self._draw_table_section(
                 headers,
-                chunk,
+                [rows[j] for j in take],
                 col_widths,
                 col_aligns,
                 header_color,
@@ -270,7 +305,17 @@ class ReportPDF(FPDF):
                 row_font_size,
                 row_height,
             )
-            first_page = False
+            self.table_rows_drawn += len(take)
+            # _draw_table_section ends with ln(3); measure the last row itself.
+            last_row_bottom = self.get_y() - 3
+            if last_row_bottom > content_bottom + 0.5:
+                label = section_label or headers[0]
+                self.render_problems.append(
+                    f"table '{label}' ran {last_row_bottom - content_bottom:.1f}mm past the content area "
+                    f"on page {self.page_no()}"
+                )
+            i = cur
+            first = False
 
     def _draw_table_section(
         self,
@@ -296,15 +341,14 @@ class ReportPDF(FPDF):
             else:
                 self.set_fill_color(255, 255, 255)
             self.set_text_color(50, 50, 50)
-            self.set_font(self.body_font, "", row_font_size)
-            cells = [str(cell_text).split("\n") for cell_text in row]
-            max_lines = max(len(lines) for lines in cells)
-            for lines in cells:
+            wrapped = [self._wrap_cell(str(cell_text), col_widths[i], row_font_size) for i, cell_text in enumerate(row)]
+            max_lines = max((len(lines) for lines in wrapped), default=1)
+            for lines in wrapped:
                 lines.extend([""] * (max_lines - len(lines)))
             row_start = self.get_y()
             for line_idx in range(max_lines):
                 y = row_start + line_idx * row_height
-                for i, lines in enumerate(cells):
+                for i, lines in enumerate(wrapped):
                     text = self.truncate_text(lines[line_idx], col_widths[i], row_font_size)
                     self.set_xy(self.l_margin + sum(col_widths[:i]), y)
                     self.cell(

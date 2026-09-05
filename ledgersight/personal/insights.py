@@ -8,6 +8,7 @@ it can be tested independently of the PDF rendering layer.
 from __future__ import annotations
 
 import datetime
+import re
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ import yaml
 
 from ledgersight.categorizer import normalize_merchant
 from ledgersight.personal.consolidation import (
+    DEBT_CATEGORIES,
+    MOVEMENT_CATEGORIES,
     SPENDING_CATEGORIES,
     AccountLedger,
     ConsolidatedResult,
@@ -31,6 +34,79 @@ from ledgersight.personal.models import Transaction
 INCOME_CATEGORIES = {"Payroll", "Deposit", "Government"}
 BILL_EXCLUDED_CATEGORIES = {"Transfers", "Other"}
 FORECAST_HORIZON_DAYS = 91
+
+# A single definition of "spending": every debit except internal transfers
+# (money moved between the user's own accounts) and loan/card payments.
+# Everything else - including items that remain uncategorized ("Other") -
+# counts as spending, exactly matching the cover-page "Where Money Went"
+# figure, so no two pages can disagree.
+NON_SPENDING_CATEGORIES = MOVEMENT_CATEGORIES | DEBT_CATEGORIES
+
+_REFUND_MARKERS = ("REFUND", "REFUNDED", "REVERSAL")
+
+# Tokens that describe the payment rail rather than the merchant, dropped
+# when grouping payees so "PAYPAL INST XFER HIDIVE" (March) and
+# "PAYPAL PURCHASE HIDIVE" (August) collapse into one HIDIVE merchant.
+_MERCHANT_NOISE_TOKENS = {
+    "PAYPAL",
+    "INST",
+    "XFER",
+    "TRANSFER",
+    "PURCHASE",
+    "WEB",
+    "ACH",
+    "ZELLE",
+    "POS",
+    "DEBIT",
+    "CARD",
+    "WITHDRAWAL",
+    "BANK",
+}
+
+
+def is_spending(tx: Transaction) -> bool:
+    """True when a debit is ordinary spending (not a transfer or loan payment)."""
+    return not tx.is_credit and tx.category not in NON_SPENDING_CATEGORIES
+
+
+def is_refund(tx: Transaction) -> bool:
+    """True for credits that return money (e.g. a returned security deposit)."""
+    return tx.is_credit and any(m in tx.description.upper() for m in _REFUND_MARKERS)
+
+
+def canon_merchant(name: str) -> str:
+    """Merchant identity with payment-rail tokens removed.
+
+    Used for grouping so merchant-name changes (a subscript moved from
+    "INST XFER" to "PURCHASE" without changing the underlying service) are
+    treated as one payee. Only alphabetic tokens are kept so statement
+    reference numbers do not split one merchant into many groups.
+    """
+    tokens = sorted(
+        {t for t in re.split(r"[\W_]+", name.upper()) if t and t.isalpha() and t not in _MERCHANT_NOISE_TOKENS}
+    )
+    return " ".join(tokens)
+
+
+_LEADING_MEMO_DATE = re.compile(r"^\d{1,2}/\d{1,2}/\d{2,4}\s+")
+
+
+def display_merchant(name: str) -> str:
+    """Human-facing payee name: drops a leading memo date such as ``3/17/26``."""
+    return _LEADING_MEMO_DATE.sub("", name).strip() or name
+
+
+def best_display_name(names: Iterable[str]) -> str:
+    """Pick the cleanest variant of a merchant name from a group.
+
+    Fewest digits wins (reference numbers and memo dates lose to the plain
+    merchant string), then the longer, more descriptive name.
+    """
+    candidates = [n for n in names if n]
+    if not candidates:
+        return ""
+    return min(candidates, key=lambda n: (sum(c.isdigit() for c in n), -len(n), n))
+
 
 BUDGET_CATEGORIES = sorted(SPENDING_CATEGORIES)
 
@@ -45,14 +121,25 @@ def _months_between(start: datetime.date, end: datetime.date) -> int:
     return max(1, (end.year - start.year) * 12 + (end.month - start.month) + 1)
 
 
-def month_series(ledgers: list[AccountLedger]) -> dict[tuple[int, int], dict[str, Decimal]]:
-    """Per calendar month: income, spending, cash balance, card debt."""
-    series: dict[tuple[int, int], dict[str, Decimal]] = defaultdict(
+def month_series(ledgers: list[AccountLedger]) -> dict[tuple[int, int], dict[str, Any]]:
+    """Per calendar month: income, spending, cash balance, card debt.
+
+    ``income`` is earned income only (income-category credits minus refunds);
+    refunds are reported separately. ``spending`` uses the unified definition
+    (``is_spending``). ``cash_accounts`` / ``cash_accounts_total`` let the
+    renderer flag months where some accounts have no statement (the counters
+    are ints, unlike the Decimal money fields).
+    """
+    non_card_count = sum(1 for led in ledgers if led.account_type != "Credit Card")
+    series: dict[tuple[int, int], dict[str, Any]] = defaultdict(
         lambda: {
             "income": Decimal("0"),
+            "refunds": Decimal("0"),
             "spending": Decimal("0"),
             "cash": Decimal("0"),
             "debt": Decimal("0"),
+            "cash_accounts": 0,
+            "cash_accounts_total": non_card_count,
         }
     )
     for ledger in ledgers:
@@ -61,29 +148,87 @@ def month_series(ledgers: list[AccountLedger]) -> dict[tuple[int, int], dict[str
             entry = series[(month.year, month.month)]
             for tx in month.transactions:
                 if tx.is_credit and tx.category in INCOME_CATEGORIES:
-                    entry["income"] += tx.amount
-                elif not tx.is_credit and tx.category in SPENDING_CATEGORIES:
+                    if is_refund(tx):
+                        entry["refunds"] += tx.amount
+                    else:
+                        entry["income"] += tx.amount
+                elif is_spending(tx):
                     entry["spending"] += tx.amount
             bal = balance_asof(ledger, _last_day(month.year, month.month))
             if is_card:
                 entry["debt"] += bal
             else:
                 entry["cash"] += bal
+                entry["cash_accounts"] += 1
     return dict(sorted(series.items()))
 
 
-def dashboard_totals(result: ConsolidatedResult, as_of: datetime.date) -> dict[str, Decimal]:
-    """Headline dashboard figures for the covered period."""
-    income = sum(
-        (t.amount for t in result.all_transactions if t.is_credit and t.category in INCOME_CATEGORIES), Decimal("0")
-    )
-    spending = sum(
-        (t.amount for t in result.all_transactions if not t.is_credit and t.category in SPENDING_CATEGORIES),
+def _liquid_ledgers(result: ConsolidatedResult) -> list[AccountLedger]:
+    return [led for led in result.ledgers if led.account_type != "Credit Card"]
+
+
+def dashboard_totals(result: ConsolidatedResult, as_of: datetime.date) -> dict[str, Any]:
+    """Headline dashboard figures, split so income/savings are unambiguous.
+
+    The report-wide definitions live here so every page agrees:
+
+    - ``earned_income`` excludes refunds and transfers-in.
+    - ``spending`` (unified) includes uncategorized "Other" debits.
+    - ``savings`` is the observed change in cash & savings plus the reduction
+      in credit-card debt over the covered period - the number that survives
+      after also paying down the uncovered loans and unresolved outflows.
+    """
+    all_tx = result.all_transactions
+    total_credits = sum((t.amount for t in all_tx if t.is_credit), Decimal("0"))
+    total_debits = sum((t.amount for t in all_tx if not t.is_credit), Decimal("0"))
+
+    income_total = sum((t.amount for t in all_tx if t.is_credit and t.category in INCOME_CATEGORIES), Decimal("0"))
+    refunds = sum(
+        (t.amount for t in all_tx if t.is_credit and t.category in INCOME_CATEGORIES and is_refund(t)),
         Decimal("0"),
     )
-    cash = sum((balance_asof(led, as_of) for led in result.ledgers if led.account_type != "Credit Card"), Decimal("0"))
-    debt = sum((balance_asof(led, as_of) for led in result.ledgers if led.account_type == "Credit Card"), Decimal("0"))
-    return {"income": income, "spending": spending, "cash": cash, "debt": debt}
+    transfers_in = sum((t.amount for t in all_tx if t.is_credit and t.category in MOVEMENT_CATEGORIES), Decimal("0"))
+    other_credits = total_credits - income_total - transfers_in
+
+    spending = sum((t.amount for t in all_tx if is_spending(t)), Decimal("0"))
+
+    cash_accounts: list[dict[str, str]] = [
+        {
+            "label": led.label,
+            "account_type": led.account_type,
+            "as_of": led.as_of or led.last_tx_date,
+            "balance": str(balance_asof(led, as_of)),
+        }
+        for led in _liquid_ledgers(result)
+    ]
+    debt_accounts: list[dict[str, str]] = [
+        {
+            "label": led.label,
+            "account_type": "Credit Card",
+            "as_of": led.as_of or led.last_tx_date,
+            "balance": str(balance_asof(led, as_of)),
+        }
+        for led in result.ledgers
+        if led.account_type == "Credit Card"
+    ]
+    cash = sum((Decimal(a["balance"]) for a in cash_accounts), Decimal("0"))
+    debt = sum((Decimal(a["balance"]) for a in debt_accounts), Decimal("0"))
+    earned = income_total - refunds
+    return {
+        "earned_income": earned,
+        "income": earned,
+        "income_credits": income_total,
+        "refunds": refunds,
+        "transfers_in": transfers_in,
+        "other_credits": other_credits,
+        "total_credits": total_credits,
+        "total_debits": total_debits,
+        "spending": spending,
+        "cash": cash,
+        "debt": debt,
+        "cash_accounts": cash_accounts,
+        "debt_accounts": debt_accounts,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +248,8 @@ class RepeatingPayment:
     start_date: datetime.date
     last_date: datetime.date
     occurrences: int
+    active: bool = True
+    needs_confirm: bool = False
 
     @property
     def amount_range(self) -> str:
@@ -113,16 +260,25 @@ class RepeatingPayment:
 
 def detect_repeating_payments(
     transactions: Iterable[Transaction],
+    as_of: datetime.date | None = None,
     min_occurrences: int = 3,
 ) -> list[RepeatingPayment]:
     """Find payments and income that recur on a regular cadence.
 
-    Transactions are grouped by normalized merchant. Eligible credits are
-    income categories (payroll/deposits); eligible debits are everything
-    except internal transfers. A group counts as recurring when it shows at
-    least ``min_occurrences`` entries on a consistent interval (all gaps
-    within 25% of the median, cadence 4-92 days) with a stable amount (no
-    more than 10%, or $2, variation).
+    Transactions are grouped by canonical merchant, so a merchant that
+    changed its payment rail mid-year ("PAYPAL INST XFER HIDIVE" ->
+    "PAYPAL PURCHASE HIDIVE") stays one payee. Eligible credits are income
+    categories (payroll/deposits); eligible debits are everything except
+    internal transfers. A group counts as recurring when it shows at least
+    ``min_occurrences`` entries on a consistent interval (all gaps within 25%
+    of the median, cadence 4-92 days) with a stable amount (no more than 10%,
+    or $2, variation).
+
+    ``active`` marks whether the pattern is still current relative to
+    ``as_of`` (last occurrence within twice the cadence, or 60 days,
+    whichever is larger); stale groups are reported but excluded from the
+    forecast. ``needs_confirm`` flags long cadences that are worth a manual
+    look.
     """
     groups: dict[str, list[Transaction]] = defaultdict(list)
     for tx in transactions:
@@ -131,10 +287,10 @@ def detect_repeating_payments(
                 continue
         elif tx.category in BILL_EXCLUDED_CATEGORIES:
             continue
-        groups[normalize_merchant(tx.description)].append(tx)
+        groups[canon_merchant(normalize_merchant(tx.description))].append(tx)
 
     found: list[RepeatingPayment] = []
-    for payee, txs in groups.items():
+    for _key, txs in groups.items():
         if len(txs) < min_occurrences:
             continue
         dates = sorted(_to_date(t.post_date) for t in txs)
@@ -151,9 +307,13 @@ def detect_repeating_payments(
             continue
         first = txs[0]
         typical = Decimal(sum(amounts, Decimal("0")) / len(amounts)).quantize(Decimal("0.01"), rounding="ROUND_HALF_UP")
+        names = {display_merchant(normalize_merchant(t.description)) for t in txs}
+        active = True
+        if as_of is not None:
+            active = (as_of - dates[-1]).days <= max(med * 2, 60)
         found.append(
             RepeatingPayment(
-                payee=payee,
+                payee=best_display_name(names) or _key,
                 category=first.category or ("Income" if first.is_credit else ""),
                 income=first.is_credit,
                 cadence_days=med,
@@ -163,6 +323,8 @@ def detect_repeating_payments(
                 start_date=dates[0],
                 last_date=dates[-1],
                 occurrences=len(dates),
+                active=active,
+                needs_confirm=med >= 60,
             )
         )
     found.sort(key=lambda r: (r.last_date, r.payee))
@@ -260,21 +422,32 @@ def build_forecast(
     This is an estimate, not a commitment.
     """
     events: list[ForecastEvent] = []
-    strict_payees = {r.payee for r in repeating}
+    active_payees = {r.payee for r in repeating if r.active}
     horizon = as_of + datetime.timedelta(days=horizon_days)
     for r in repeating:
+        if not r.active:
+            continue
         nxt = r.last_date + datetime.timedelta(days=r.cadence_days)
         while nxt <= horizon:
             events.append(ForecastEvent(event_date=nxt, payee=r.payee, income=r.income, amount=r.typical_amount))
             nxt += datetime.timedelta(days=r.cadence_days)
     for inc in estimated_income:
-        if inc.payee in strict_payees or inc.next_event > horizon:
+        if inc.payee in active_payees or inc.next_event > horizon:
             continue
-        events.append(
-            ForecastEvent(
-                event_date=inc.next_event, payee=f"{inc.payee} \u2013 estimated", income=True, amount=inc.median_amount
+        # Variable income repeats on its observed cadence across the whole
+        # horizon (e.g. ~13 per-mile trucking paydays in 91 days), not just a
+        # single "next" arrival.
+        nxt = inc.next_event
+        while nxt <= horizon:
+            events.append(
+                ForecastEvent(
+                    event_date=nxt,
+                    payee=f"{inc.payee} \u2013 estimated",
+                    income=True,
+                    amount=inc.median_amount,
+                )
             )
-        )
+            nxt += datetime.timedelta(days=inc.median_cadence_days)
     events = [e for e in events if e.event_date > as_of]
     events.sort(key=lambda e: e.event_date)
     running = starting_cash
@@ -351,6 +524,25 @@ def category_spend_totals(ledgers: Iterable[AccountLedger]) -> dict[str, Decimal
                 continue
             totals[tx.category] += tx.amount
     return dict(totals)
+
+
+def typical_monthly_spending(
+    ledgers: Iterable[AccountLedger],
+    months: int,
+) -> dict[str, Decimal]:
+    """Average monthly debits by category, using the unified spending rule.
+
+    Transfers and loan/card payments are excluded so the result can be
+    combined with the recurring-bill forecast without double counting.
+    """
+    per_category: dict[str, Decimal] = defaultdict(Decimal)
+    for ledger in ledgers:
+        for tx in ledger.transactions:
+            if is_spending(tx) and tx.category:
+                per_category[tx.category] += tx.amount
+    if months < 1:
+        return dict(per_category)
+    return {name: amount / Decimal(months) for name, amount in per_category.items()}
 
 
 def budget_category_rows(

@@ -8,14 +8,17 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from ledgersight.personal.categorizer import categorize, categorize_transactions, clean_memo_prefix
-from ledgersight.personal.consolidation import consolidate
+from ledgersight.personal.consolidation import consolidate, running_balance_map
 from ledgersight.personal.models import Statement, Transaction
 from ledgersight.personal.parser import _is_page_artifact  # noqa: F401 (import sanity)
 from ledgersight.personal.report import (
+    STATUS_ORDER_ONLY,
     _cash_and_debt_change,
     _duplicate_detail_rows,
     _mask_desc,
     _month_first_supported,
+    _period_note,
+    _printed_sequence_consistent,
     _reconcile_statements,
     _running_balance_mismatches,
     _write_audit_csv,
@@ -188,8 +191,58 @@ class TestRunningBalanceMismatches(unittest.TestCase):
         result = consolidate([stmt])
         rows = _running_balance_mismatches(result.ledgers[0])
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0][3], "198.01")
-        self.assertEqual(rows[0][4], "151.15")
+        self.assertEqual(rows[0][3], "$198.01")
+        self.assertEqual(rows[0][4], "$151.15")
+        self.assertEqual(rows[0][5], "$26.43")
+        self.assertEqual(rows[0][7], "Verify \u2013 possible parse error or missing row")
+
+    def test_shared_post_date_rows_each_checked(self) -> None:
+        stmt = make_stmt()
+        stmt.beginning_balance = Decimal("500.00")
+        stmt.transactions = [
+            make_tx("06/24/2026", "RICHERS TRUCKING PAYROLL", "400.00", True, "900.00"),
+            make_tx("06/24/2026", "WAL-MART STORE", "40.00", False, "860.00"),
+        ]
+        result = consolidate([stmt])
+        rows = _running_balance_mismatches(result.ledgers[0])
+        self.assertEqual(rows, [])
+
+    def test_shared_post_date_rows_mismatch(self) -> None:
+        stmt = make_stmt()
+        stmt.beginning_balance = Decimal("500.00")
+        stmt.transactions = [
+            make_tx("06/24/2026", "RICHERS TRUCKING PAYROLL", "400.00", True, "900.00"),
+            make_tx("06/24/2026", "WAL-MART STORE", "40.00", False, "400.00"),
+        ]
+        result = consolidate([stmt])
+        rows = _running_balance_mismatches(result.ledgers[0])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][3], "$400.00")
+        self.assertEqual(rows[0][4], "$860.00")
+
+    def test_out_of_date_order_statement_is_informational(self) -> None:
+        # Mirrors a Capital One statement that lists January rows before the
+        # December ones: printed balances chain in row order (189.25 -> 230.29
+        # -> ... -> 198.01 = closing), so date-order recomputation differs but
+        # nothing is missing.
+        stmt = make_card_stmt()
+        stmt.statement_date = "01/17/2026"
+        stmt.beginning_balance = Decimal("189.25")
+        stmt.ending_balance = Decimal("198.01")
+        stmt.transactions = [
+            make_tx("01/02/2026", "PHILLIPS 66", "41.04", False, "230.29"),
+            make_tx("01/12/2026", "CAPITAL ONE AUTOPAY PYMT", "100.00", True, "130.29"),
+            make_tx("12/20/2025", "FLYING J 737", "14.75", False, "145.04"),
+            make_tx("12/31/2025", "PILOT 1135", "52.97", False, "198.01"),
+        ]
+        stmt.total_credits = Decimal("100.00")
+        stmt.total_debits = Decimal("108.76")
+        stmt.credit_count, stmt.debit_count = 1, 3
+        result = consolidate([stmt])
+        rows = _running_balance_mismatches(result.ledgers[0])
+        self.assertTrue(rows)
+        self.assertTrue(all(r[7] == STATUS_ORDER_ONLY for r in rows))
+        self.assertTrue(_printed_sequence_consistent(stmt, is_card=True))
 
     def test_ignores_rows_within_period(self) -> None:
         stmt = make_stmt()
@@ -217,17 +270,79 @@ class TestMonthFirstSupported(unittest.TestCase):
         first = _month_first_supported(result.ledgers[0], 2025, 12)
         self.assertEqual(first.isoformat(), "2025-12-27")
 
+    def test_full_month_covered_by_straddling_statement(self) -> None:
+        stmt = make_stmt()
+        stmt.statement_date = "06/30/2026"
+        stmt.period_start = "05/30/2026"
+        result = consolidate([stmt])
+        first = _month_first_supported(result.ledgers[0], 2026, 6)
+        self.assertEqual(first.isoformat(), "2026-06-01")
+
+    def test_jan_covered_by_nov_feb_statement(self) -> None:
+        stmt = make_stmt()
+        stmt.statement_date = "02/27/2026"
+        stmt.period_start = "11/29/2025"
+        result = consolidate([stmt])
+        first = _month_first_supported(result.ledgers[0], 2026, 1)
+        self.assertEqual(first.isoformat(), "2026-01-01")
+
+    def test_half_covered_month_clips_to_start(self) -> None:
+        stmt = make_stmt()
+        stmt.statement_date = "01/15/2026"
+        stmt.period_start = "01/08/2026"
+        result = consolidate([stmt])
+        first = _month_first_supported(result.ledgers[0], 2026, 1)
+        self.assertEqual(first.isoformat(), "2026-01-08")
+
+    def test_card_period_inferred_from_prior_closing_date(self) -> None:
+        # Capital One prints only a closing date; consecutive statements abut,
+        # so the March statement (closing 03/28) starts 02/26 and covers all
+        # of March 1-28 even though its first transaction is on 03/23.
+        feb = make_card_stmt()
+        feb.statement_date = "02/25/2026"
+        feb.transactions = [make_tx("02/10/2026", "CASEYS", "10.00", False, "1182.85")]
+        feb.ending_balance = Decimal("1182.85")
+        mar = make_card_stmt()
+        mar.statement_date = "03/28/2026"
+        mar.beginning_balance = Decimal("1182.85")
+        mar.transactions = [make_tx("03/23/2026", "LOVE'S", "12.00", False, "1194.85")]
+        mar.ending_balance = Decimal("1194.85")
+        result = consolidate([feb, mar])
+        ledger = result.ledgers[0]
+        self.assertEqual(_month_first_supported(ledger, 2026, 3).isoformat(), "2026-03-01")
+        self.assertIn("02/26/2026", _period_note(mar, ledger))
+        self.assertIn("inferred", _period_note(mar, ledger))
+        # The first statement has nothing to abut against: fall back honestly.
+        self.assertIn("start", _period_note(feb, ledger))
+
+    def test_gap_between_statements_is_not_bridged(self) -> None:
+        jan = make_card_stmt()
+        jan.statement_date = "01/28/2026"
+        may = make_card_stmt()
+        may.statement_date = "05/28/2026"
+        may.transactions = [make_tx("05/08/2026", "LOVE'S", "12.00", False, "1145.97")]
+        result = consolidate([jan, may])
+        ledger = result.ledgers[0]
+        self.assertEqual(_month_first_supported(ledger, 2026, 5).isoformat(), "2026-05-08")
+
 
 class TestWriteAuditCsv(unittest.TestCase):
     def test_audit_rows(self) -> None:
+        stmt = make_stmt()
+        result = consolidate([stmt])
+        run_maps = dict(running_balance_map(result.ledgers[0]))
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "audit.csv"
-            _write_audit_csv([make_stmt()], path, mask_personal=True)
+            _write_audit_csv([stmt], path, mask_personal=True, run_maps=run_maps)
             lines = path.read_text().splitlines()
-        self.assertEqual(lines[0], "Account,Statement,PostDate,Description,Amount,Type,Balance,Category")
+        self.assertEqual(
+            lines[0],
+            "Account,Statement,PostDate,Description,Amount,Type,Balance,Category,Running",
+        )
         self.assertEqual(len(lines), 5)
         credit_line = [line for line in lines if line.split(",")[5] == "Credit"][0]
         self.assertTrue(credit_line.split(",")[4] == "500.00")
+        self.assertTrue(credit_line.endswith("600.00"))
         debit_lines = [line for line in lines if line.split(",")[5] == "Debit"]
         self.assertEqual(len(debit_lines), 3)
         self.assertTrue(all(line.split(",")[4].startswith("-") for line in debit_lines))
