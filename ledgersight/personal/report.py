@@ -5,10 +5,11 @@ from __future__ import annotations
 import csv
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from ledgersight.categorizer import normalize_merchant
 from ledgersight.parsers import fmt_dollar
@@ -34,19 +35,26 @@ from ledgersight.personal.consolidation import (
 from ledgersight.personal.insights import (
     FORECAST_HORIZON_DAYS,
     Budget,
+    apply_check_annotations,
     best_display_name,
+    bill_calendar,
     budget_category_rows,
     budget_month_rows,
     build_forecast,
     canon_merchant,
+    cash_outflow_baselines,
     category_spend_totals,
+    check_register,
+    complete_months,
     dashboard_totals,
+    debt_log,
     detect_repeating_payments,
     display_merchant,
     estimate_income_groups,
     load_budget,
+    load_check_annotations,
     month_series,
-    typical_monthly_spending,
+    subscription_review,
 )
 from ledgersight.personal.models import Statement, Transaction
 
@@ -165,7 +173,7 @@ def _running_balance_mismatches(ledger: AccountLedger) -> list[list[str]]:
         )
         if stmt is None:
             continue
-        source = Path(stmt.file_path).name if stmt.file_path else f"statement {stmt.statement_date}"
+        source = _source_ref(stmt, tx)
         recomputed = run[id(tx)]
         if abs(tx.balance - recomputed) <= Decimal("0.005"):
             continue
@@ -329,8 +337,8 @@ def _date_sanity(ledger: AccountLedger) -> list[dict]:
     issues: list[dict] = []
     for stmt in ledger.statements:
         end = _to_date(stmt.statement_date)
-        source = Path(stmt.file_path).name if stmt.file_path else f"statement {stmt.statement_date}"
         for tx in stmt.transactions:
+            source = _source_ref(stmt, tx)
             tx_date = _to_date(tx.post_date)
             problem = ""
             if tx_date > end:
@@ -593,15 +601,41 @@ def _render_reconciliation(
         )
 
     matched = sum(m.matched for m in result.movements)
+    basis_counts = Counter(m.basis for m in result.movements if m.matched)
+    reason_counts = Counter(m.unmatched_reason for m in result.movements if not m.matched)
     pdf.ln(2)
     pdf.sub_title("Internal Money Movement")
+    basis_text = ", ".join(
+        f"{n} by {label}"
+        for key, label in (
+            ("reference", "transfer reference number"),
+            ("autopay", "card autopay"),
+            ("amount+date", "equal amount within two days (no shared reference \u2013 verify)"),
+        )
+        if (n := basis_counts.get(key, 0))
+    )
     pdf.body_text(
         f"{matched} of {len(result.movements)} transfers / card payments were matched to an offsetting "
-        "credit in another covered account (by transfer reference number or autopay). Unmatched entries "
-        "moved money to accounts without statements (e.g. a business checking account), were card payments "
-        "outside the \u00b15-day window, or fell in months with no statement coverage.",
+        f"credit in another covered account ({basis_text}).",
         size=8,
     )
+    if reason_counts:
+        reason_rows = [
+            [
+                reason,
+                str(n),
+                fmt_dollar(sum((m.amount for m in result.movements if m.unmatched_reason == reason), Decimal("0"))),
+            ]
+            for reason, n in sorted(reason_counts.items(), key=lambda kv: -kv[1])
+        ]
+        pdf.draw_table(
+            ["Why the remaining movements are unmatched", "Count", "Total"],
+            reason_rows,
+            col_widths=[120, 20, 32],
+            col_aligns=["L", "R", "R"],
+            row_font_size=7,
+            row_height=4.5,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -692,8 +726,32 @@ def _cadence_label(days: int) -> str:
     return f"every {days} days"
 
 
+def _income_to_cash_bridge(totals: dict[str, Any], flow: dict[str, Decimal]) -> list[tuple[str, Decimal]]:
+    """Walk from income to the observed change in cash & card debt.
+
+    Every line is a real movement in the covered accounts, so the bridge
+    sums exactly to total credits minus total debits (an export check
+    verifies this). It exists because "income less categorized spending"
+    alone says nothing about how much cash was kept: loan payments and
+    transfers to outside accounts still have to leave.
+    """
+    income_less_spending = totals["earned_income"] - flow["spending"]
+    return [
+        ("Income (payroll + other deposits)", totals["earned_income"]),
+        ("less categorized spending", -flow["spending"]),
+        ("= Income less categorized spending", income_less_spending),
+        ("less loan/card payments to lenders outside these statements", -flow["other_debt"]),
+        ("less transfers to outside accounts / unresolved outflows", -flow["unmatched"]),
+        ("plus refunds received", totals["refunds"]),
+        ("plus transfers in from outside accounts", totals["transfers_in"] - flow["matched_transfer"]),
+        ("plus other credits (net of payments to the covered cards)", totals["other_credits"] - flow["matched_card"]),
+        ("= Observed change in cash & card debt", totals["total_credits"] - totals["total_debits"]),
+    ]
+
+
 def _render_dashboard(pdf: ReportPDF, result: ConsolidatedResult, start: date, end: date) -> None:
-    """One-page at-a-glance: income/debt split, snapshot, month-by-month table."""
+    """One-page at-a-glance: credit/debit breakdown, income-to-cash bridge,
+    snapshot, month-by-month table and month-end balances by account."""
     pdf.add_page()
     pdf.section_title("Consolidated Dashboard")
     totals = dashboard_totals(result, end)
@@ -701,38 +759,54 @@ def _render_dashboard(pdf: ReportPDF, result: ConsolidatedResult, start: date, e
 
     metric_rows = [
         ["Total Credits (all covered accounts)", fmt_dollar(totals["total_credits"])],
-        ["  Earned Income (Payroll & cash deposits)", fmt_dollar(totals["earned_income"])],
-        ["    less Refunds (returned deposits etc.)", fmt_dollar(-totals["refunds"])],
+        ["  Payroll (identified employer deposits)", fmt_dollar(totals["payroll"])],
+        ["  Other deposits (source not confirmed)", fmt_dollar(totals["deposits"])],
+        ["  Refunds (returned deposits etc.)", fmt_dollar(totals["refunds"])],
         ["  Transfers in (from your other accounts)", fmt_dollar(totals["transfers_in"])],
-        ["  Other credits (card autopays, reimbursements)", fmt_dollar(totals["other_credits"])],
+        ["  Other credits (card payment credits, adjustments)", fmt_dollar(totals["other_credits"])],
         ["Total Debits (all covered accounts)", fmt_dollar(totals["total_debits"])],
-        ["  Spending (debits excl. transfers & loan/card payments)", fmt_dollar(flow["spending"])],
-        ["  Other loan/card payments", fmt_dollar(flow["other_debt"])],
-        ["  Unmatched transfers / unresolved outflows", fmt_dollar(flow["unmatched"])],
-        ["Net Cash Flow (Earned Income \u2212 Spending)", fmt_dollar(totals["earned_income"] - flow["spending"])],
-        [
-            "Change in Cash & Card Debt (observed balance movements)",
-            fmt_dollar(totals["total_credits"] - totals["total_debits"]),
-        ],
+        ["  Categorized spending (every debit except transfers & loan/card payments)", fmt_dollar(flow["spending"])],
+        ["  Payments to the covered Capital One cards", fmt_dollar(flow["matched_card"])],
+        ["  Other loan/card payments (lenders outside these statements)", fmt_dollar(flow["other_debt"])],
+        ["  Transfers to your other covered accounts (matched)", fmt_dollar(flow["matched_transfer"])],
+        ["  Transfers to outside accounts / unresolved outflows", fmt_dollar(flow["unmatched"])],
     ]
     pdf.draw_table(
-        ["Metric", "Amount"],
+        ["Credits and debits, broken down", "Amount"],
         metric_rows,
-        col_widths=[112, 40],
+        col_widths=[118, 34],
         col_aligns=["L", "R"],
         row_font_size=7.5,
         row_height=4.8,
     )
     pdf.body_text(
-        "\u201cEarned Income\u201d is Payroll/Deposit/Government credits minus refunds - so a returned "
-        "security deposit or a subscription cash-back is shown on its own line, not counted as earned. "
-        "\u201cSpending\u201d uses the same rule as the cover page: every debit except internal transfers "
-        "and loan/card payments, including items still awaiting a category. The final line is the "
-        "observed improvement: total credits minus total debits equals the change in cash & savings plus "
-        "the reduction in card debt across the covered accounts.",
-        size=8,
+        "The indented lines sum to the total above them. \u201cOther deposits\u201d are Deposit/Government "
+        "credits that are not identified payroll - confirm their source before treating them as earned. "
+        "Refunds (e.g. the $300 returned security deposit) are listed on their own line and are not income. "
+        "\u201cCategorized spending\u201d is the same figure as the cover page: every debit except internal "
+        "transfers and loan/card payments, including items still awaiting a category.",
+        size=7.5,
     )
-    pdf.ln(3)
+    pdf.ln(2)
+
+    pdf.sub_title("From income to the observed change in cash")
+    bridge = _income_to_cash_bridge(totals, flow)
+    pdf.draw_table(
+        ["Step", "Amount"],
+        [[label, fmt_dollar(amount)] for label, amount in bridge],
+        col_widths=[118, 34],
+        col_aligns=["L", "R"],
+        row_font_size=7.5,
+        row_height=4.8,
+    )
+    pdf.body_text(
+        "\u201cIncome less categorized spending\u201d is not a savings figure: loan payments to lenders "
+        "outside these statements and transfers to outside accounts still have to leave. The last line is "
+        "what actually happened to the covered accounts over the period - the change in cash & savings plus "
+        "the reduction in card debt.",
+        size=7.5,
+    )
+    pdf.ln(2)
 
     pdf.sub_title("Current Snapshot \u2013 balances by account")
     snap_rows = []
@@ -748,56 +822,99 @@ def _render_dashboard(pdf: ReportPDF, result: ConsolidatedResult, start: date, e
         row_height=4.8,
         section_label="Dashboard Snapshot",
     )
-    pdf.ln(3)
+    pdf.ln(2)
 
+    series = month_series(result.ledgers)
     pdf.sub_title("Month-by-Month")
     month_rows: list[list[str]] = []
-    notes: set[str] = set()
-    for (year, month), entry in month_series(result.ledgers).items():
+    incomplete_months: list[str] = []
+    for (year, month), entry in series.items():
         net = entry["income"] - entry["spending"]
-        rate = ""
-        if entry["income"] > 0:
-            rate = f"{net / entry['income'] * 100:.1f}%"
+        observed = entry["total_credits"] - entry["total_debits"]
+        cash_cell = fmt_dollar(entry["cash"])
+        missing_cash = [lbl for lbl in entry["missing"] if "Capital One" not in lbl]
+        if missing_cash:
+            cash_cell += " \u2020"
+            incomplete_months.append(f"{date(year, month, 1):%B %Y}")
         month_rows.append(
             [
-                f"{date(year, month, 1):%B %Y}",
-                fmt_dollar(entry["income"]),
+                f"{date(year, month, 1):%b %Y}",
+                fmt_dollar(entry["payroll"]),
+                fmt_dollar(entry["deposits"]),
                 fmt_dollar(entry["spending"]),
                 fmt_dollar(net),
-                rate,
-                fmt_dollar(entry["cash"]),
+                fmt_dollar(observed),
+                cash_cell,
                 fmt_dollar(entry["debt"]),
             ]
         )
-        if entry["refunds"] > 0:
-            notes.add("Refunds (e.g. the $300 returned security deposit) are excluded from Income.")
-        if entry["cash_accounts"] < entry["cash_accounts_total"]:
-            notes.add(
-                "Cash & Savings sums only the accounts with a statement that month \u2013 e.g. the savings "
-                "account reported no July/August activity. See Missing Statement Coverage on the cover."
-            )
     pdf.draw_table(
-        ["Month", "Income", "Spending", "Net", "Savings Rate", "Cash & Savings", "Card Debt"],
+        [
+            "Month",
+            "Payroll",
+            "Other Deposits",
+            "Spending",
+            "Income \u2212 Spending",
+            "Observed Change",
+            "Cash & Savings",
+            "Card Debt",
+        ],
         month_rows,
-        col_widths=[27, 27, 27, 26, 24, 28, 27],
-        col_aligns=["L", "R", "R", "R", "R", "R", "R"],
+        col_widths=[20, 22, 24, 22, 26, 26, 24, 22],
+        col_aligns=["L", "R", "R", "R", "R", "R", "R", "R"],
         section_label="Dashboard",
+        header_font_size=6.5,
+        row_font_size=7,
     )
-    for note in sorted(notes):
-        pdf.body_text(f"\u2022 {note}", size=7.5)
     pdf.body_text(
-        "Months outside the covered statements are omitted; Savings Rate is blank when no income was "
-        "recorded that month. \u201cIncome\u201d here is earned income (excluding refunds).",
-        size=8,
+        "\u201cIncome \u2212 Spending\u201d is income less categorized spending for the month, before loan "
+        "payments and transfers to outside accounts - it is not a savings rate. \u201cObserved Change\u201d "
+        "is every credit minus every debit that month across the covered accounts, i.e. how the combined "
+        "cash and card position actually moved. Balances are month-end values.",
+        size=7.5,
+    )
+    if incomplete_months:
+        pdf.body_text(
+            "\u2020 Combined cash for these months covers only the accounts with a statement; the missing "
+            "account's activity and balance are unknown (see the table below), so the combined figure is "
+            "not comparable with other months.",
+            size=7.5,
+        )
+
+    pdf.ln(2)
+    pdf.sub_title("Month-end balances by account")
+    labels = [led.label for led in result.ledgers]
+    short = {led.label: _ledger_short(led) for led in result.ledgers}
+    bal_rows: list[list[str]] = []
+    for (year, month), entry in series.items():
+        row = [f"{date(year, month, 1):%b %Y}"]
+        for label in labels:
+            bal = entry["balances"].get(label)
+            row.append("no statement" if bal is None else fmt_dollar(bal))
+        bal_rows.append(row)
+    widths = [22] + [Decimal(164) / len(labels)] * len(labels) if labels else [22]
+    pdf.draw_table(
+        ["Month"] + [short[label] for label in labels],
+        bal_rows,
+        col_widths=[float(w) for w in widths],
+        col_aligns=["L"] + ["R"] * len(labels),
+        section_label="Balances by Account",
+        header_font_size=6.5,
+        row_font_size=7,
+    )
+    pdf.body_text(
+        "\u201cno statement\u201d means the statement for that account and month was not provided, so its "
+        "activity and balance are unknown - not that the account was inactive. Card figures are balances owed.",
+        size=7.5,
     )
 
 
 def _paragraph_budget_template(pdf: ReportPDF) -> None:
     pdf.body_text(
-        "Budget not configured \u2013 budget-vs-actual is not shown. Create \u201cbudget.yaml\u201d in the "
-        "data folder (or pass --budget <path>) with monthly income, per-category caps and an optional "
-        "overall spending limit. The schema is documented in the project README.",
-        size=8,
+        "Budget vs Actual: not configured, so that page is omitted. To enable it, create "
+        "\u201cbudget.yaml\u201d in the data folder (or pass --budget <path>) with monthly income, "
+        "per-category caps and an optional overall spending limit - schema in the project README.",
+        size=7.5,
     )
 
 
@@ -808,12 +925,13 @@ def _render_budget(
     start: date,
     end: date,
 ) -> None:
-    """Budget vs actual page. Shows guidance when no budget.yaml exists."""
-    pdf.add_page()
-    pdf.section_title("Budget vs Actual")
+    """Budget vs actual page. Skipped (with a one-line note on the dashboard)
+    when no budget.yaml is configured, instead of printing a near-empty page."""
     if budget is None or not budget.configured:
         _paragraph_budget_template(pdf)
         return
+    pdf.add_page()
+    pdf.section_title("Budget vs Actual")
     pdf.body_text(
         f"Period: {start:%B %Y} through {end:%B %Y}. Budgets are monthly; the \u201cactual\u201d column "
         "is total spending \u00f7 months covered so far.",
@@ -917,7 +1035,12 @@ def _render_recurring_and_forecast(pdf: ReportPDF, result: ConsolidatedResult, e
     forecast = build_forecast(repeating, cash, end, estimated_income=estimated)
     if forecast:
         pdf.ln(2)
-        pdf.sub_title(f"Near-Term Cash Forecast (next {FORECAST_HORIZON_DAYS} days)")
+        pdf.sub_title(f"Near-Term Cash Forecast (next {FORECAST_HORIZON_DAYS} days) \u2013 scheduled items")
+        income_notes = "; ".join(
+            f"{display_merchant(e.payee)}: {e.occurrences} distinct pay dates in the last 9 weeks, "
+            f"median every {e.median_cadence_days} days, median {fmt_dollar(e.median_amount)} per payday"
+            for e in estimated
+        )
         pdf.body_text(
             f"Starting from the latest available balances ({'; '.join(as_of_parts)}) for a combined "
             f"starting cash figure of {fmt_dollar(cash)}. Because the accounts report on different dates, "
@@ -927,11 +1050,11 @@ def _render_recurring_and_forecast(pdf: ReportPDF, result: ConsolidatedResult, e
                 if verified is not None
                 else "."
             )
-            + " Active detected bills, plus variable income (payroll/deposits) estimated from its observed "
-            f"median cadence and amount, are projected for the full {FORECAST_HORIZON_DAYS} days \u2013 "
-            "e.g. a 7-day payroll cycle produces ~13 arrivals, each marked \u201c\u2013 estimated\u201d. "
-            "This is a projection of selected detected transactions, not a complete cash plan \u2013 "
-            "confirm schedules and amounts before relying on it.",
+            + " Active detected bills and estimated variable income are projected for the full "
+            f"{FORECAST_HORIZON_DAYS} days. Income cadence is measured between distinct pay dates (two "
+            "deposits on one day count as one payday) and marked \u201c\u2013 estimated\u201d"
+            + (f" ({income_notes})." if income_notes else ".")
+            + " Confirm the schedule with the employer before relying on it.",
             size=7.5,
         )
         fc_rows = [
@@ -945,43 +1068,447 @@ def _render_recurring_and_forecast(pdf: ReportPDF, result: ConsolidatedResult, e
             for e in forecast
         ]
         pdf.draw_table(
-            ["Date", "Payee", "In/Out", "Amount", "Projected Cash"],
+            ["Date", "Payee", "In/Out", "Amount", "Projected Cash (scheduled items only)"],
             fc_rows,
-            col_widths=[20, 56, 16, 42, 52],
+            col_widths=[20, 66, 14, 30, 56],
             col_aligns=["L", "L", "C", "R", "R"],
             section_label="Forecast",
         )
 
         pdf.ln(1)
-        pdf.sub_title("Estimated expenses beyond the detected bills")
-        months_covered = max(1, len(month_series(result.ledgers)))
-        typical = typical_monthly_spending(result.ledgers, months_covered)
-        covered_cats = {r.category for r in repeating if r.active and not r.income and r.category}
-        other_rows = [
-            [cat, fmt_dollar(amt)]
-            for cat, amt in sorted(typical.items(), key=lambda kv: kv[1], reverse=True)
-            if cat not in covered_cats and amt > 0
+        pdf.sub_title("Allowances for everything not individually scheduled")
+        baselines = cash_outflow_baselines(result, repeating)
+        horizon_months = Decimal(FORECAST_HORIZON_DAYS) / Decimal("30.44")
+        per_ledger_labels = []
+        for led in result.ledgers:
+            if led.account_type == "Credit Card":
+                continue
+            complete = complete_months(led)
+            if complete:
+                per_ledger_labels.append(
+                    f"{_ledger_short(led)}: {date(complete[0][0], complete[0][1], 1):%b %Y} \u2013 "
+                    f"{date(complete[-1][0], complete[-1][1], 1):%b %Y}, {len(complete)} months"
+                )
+            else:
+                per_ledger_labels.append(f"{_ledger_short(led)}: no complete months")
+        months_label = "; ".join(per_ledger_labels) or "no complete months"
+        allow_rows = [
+            [
+                b.label,
+                fmt_dollar(b.monthly),
+                fmt_dollar(b.scheduled),
+                fmt_dollar(b.allowance),
+                fmt_dollar((b.allowance * horizon_months).quantize(Decimal("0.01"))),
+            ]
+            for b in baselines
+            if b.monthly > 0
         ]
-        pdf.draw_table(
-            ["Category", "Typical/Month"],
-            other_rows[:10],
-            col_widths=[100, 40],
-            col_aligns=["L", "R"],
-            section_label="Expected Other Spending",
+        total_allowance_month = sum((b.allowance for b in baselines), Decimal("0"))
+        total_allowance_horizon = (total_allowance_month * horizon_months).quantize(Decimal("0.01"))
+        allow_rows.append(
+            [
+                "Total",
+                fmt_dollar(sum((b.monthly for b in baselines), Decimal("0"))),
+                fmt_dollar(sum((b.scheduled for b in baselines), Decimal("0"))),
+                fmt_dollar(total_allowance_month),
+                fmt_dollar(total_allowance_horizon),
+            ]
         )
-        total_other = sum((amt for cat, amt in typical.items() if cat not in covered_cats), Decimal("0"))
-        detected_net = sum((e.amount if e.income else -e.amount for e in forecast), Decimal("0"))
-        horizon_month = FORECAST_HORIZON_DAYS / 30.0
-        runway_end = cash + detected_net - total_other * Decimal(str(horizon_month))
+        pdf.draw_table(
+            [
+                "Cash outflow bucket",
+                "Avg / complete month",
+                "Of which scheduled above",
+                "Allowance / month",
+                f"Allowance / {FORECAST_HORIZON_DAYS} days",
+            ],
+            allow_rows,
+            col_widths=[54, 32, 36, 32, 32],
+            col_aligns=["L", "R", "R", "R", "R"],
+            section_label="Forecast Allowances",
+            header_font_size=6.5,
+        )
         pdf.body_text(
-            f"The forecast above covers only {len([r for r in repeating if r.active])} detected "
-            f"recurring item(s) plus estimated income. Categories without a detected schedule "
-            f"(like {', '.join(row[0] for row in other_rows[:3])}) run roughly "
-            f"{fmt_dollar(total_other)}/month in the covered period \u2013 combining those with the "
-            f"detected line items puts projected cash near {fmt_dollar(runway_end)} at the "
-            f"{FORECAST_HORIZON_DAYS}-day mark. Categories with no data at all are omitted.",
+            f"Averages use only the complete statement months of each cash account ({months_label}); "
+            "partial first/last months are excluded. Loan/card payments and transfers to accounts outside "
+            "these statements are included because they leave the cash accounts; transfers between the "
+            "covered accounts are not. The scheduled column removes what the line items above already "
+            "cover, so nothing is counted twice.",
             size=7.5,
         )
+
+        scheduled_income = sum((e.amount for e in forecast if e.income), Decimal("0"))
+        scheduled_bills = sum((e.amount for e in forecast if not e.income), Decimal("0"))
+        adjusted_end = cash + scheduled_income - scheduled_bills - total_allowance_horizon
+        summary_rows = [
+            ["Starting cash (combined, approximate)", fmt_dollar(cash)],
+            ["+ Scheduled income (estimated paydays)", fmt_dollar(scheduled_income)],
+            ["\u2212 Scheduled bills (active recurring)", fmt_dollar(scheduled_bills)],
+            [
+                f"= Projected cash from scheduled items only (day {FORECAST_HORIZON_DAYS})",
+                fmt_dollar(forecast[-1].projected),
+            ],
+            [
+                f"\u2212 Allowances for everything else ({FORECAST_HORIZON_DAYS} days)",
+                fmt_dollar(total_allowance_horizon),
+            ],
+            [f"= Projected cash including allowances (day {FORECAST_HORIZON_DAYS})", fmt_dollar(adjusted_end)],
+        ]
+        pdf.ln(1)
+        pdf.draw_table(
+            ["Projection summary", "Amount"],
+            summary_rows,
+            col_widths=[118, 34],
+            col_aligns=["L", "R"],
+            row_font_size=7.5,
+        )
+        pdf.body_text(
+            "The scheduled-items line is optimistic by construction: it books every expected payday but "
+            "only the handful of bills that repeat exactly. The line including allowances is the planning "
+            "figure. Both assume the recent pay pattern continues.",
+            size=7.5,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Action summary, subscription review, bills & debt calendar, check register
+# ---------------------------------------------------------------------------
+
+
+def _income_baseline(result: ConsolidatedResult) -> tuple[Decimal, int]:
+    """Average earned income per complete month of the main cash account."""
+    cash = [led for led in result.ledgers if led.account_type != "Credit Card"]
+    if not cash:
+        return Decimal("0"), 0
+    main = max(cash, key=lambda led: len(led.transactions))
+    full = set(complete_months(main))
+    if not full:
+        return Decimal("0"), 0
+    series = month_series(result.ledgers)
+    total = sum((series[ym]["income"] for ym in full if ym in series), Decimal("0"))
+    return (total / Decimal(len(full))).quantize(Decimal("0.01")), len(full)
+
+
+def _render_action_summary(
+    pdf: ReportPDF,
+    result: ConsolidatedResult,
+    end: date,
+    check_annotations: dict[int, dict[str, str]],
+) -> None:
+    """One page up front: the next decisions, what is due soon, what is missing."""
+    pdf.add_page()
+    pdf.section_title("Action Summary")
+    pdf.body_text(
+        "The three decisions this report points to, what is due in the next 30 days, and the information "
+        "still missing. Every figure below is developed in the pages that follow; the account-by-month "
+        "ledger is the appendix.",
+        size=8,
+    )
+
+    repeating = detect_repeating_payments(result.all_transactions, as_of=end)
+    estimated = estimate_income_groups(result.all_transactions, end)
+    baselines = cash_outflow_baselines(result, repeating)
+    income_avg, income_months = _income_baseline(result)
+    outflow_avg = sum((b.monthly for b in baselines), Decimal("0"))
+    gap = income_avg - outflow_avg
+    subs = subscription_review(result, repeating, end)
+    subs_recent = sum((r.recent_monthly for r in subs), Decimal("0"))
+    subs_active = sum(1 for r in subs if r.recent_monthly > 0)
+    debts = debt_log(result)
+    debt_total = sum((d.balance for d in debts), Decimal("0"))
+    checks = check_register(result, check_annotations)
+    checks_unknown = [c for c in checks if not c.payee]
+    totals = dashboard_totals(result, end)
+
+    pdf.sub_title("Decisions to make")
+    decisions: list[list[str]] = []
+    if income_avg > 0:
+        verb = "exceeds" if gap < 0 else "leaves"
+        decisions.append(
+            [
+                "1",
+                "Set the monthly plan",
+                f"Over the {income_months} complete months, income averaged {fmt_dollar(income_avg)}/month and "
+                f"cash outflows {fmt_dollar(outflow_avg)}/month - spending {verb} income by "
+                f"{fmt_dollar(abs(gap))}/month. Pick the allowance buckets to cut "
+                "(Recurring Payments & Forecast page).",
+            ]
+        )
+    if subs:
+        decisions.append(
+            [
+                str(len(decisions) + 1),
+                "Keep or cancel subscriptions",
+                f"{subs_active} services charged in the last 90 days, about {fmt_dollar(subs_recent)}/month "
+                f"({fmt_dollar(sum((r.total for r in subs), Decimal('0')))} over the period). Mark each row "
+                "of the Subscription Review keep/cancel.",
+            ]
+        )
+    if debts:
+        worst = max(debts, key=lambda d: d.utilization or Decimal("0"))
+        util = f"{worst.utilization}% of its limit" if worst.utilization is not None else "limit not printed"
+        decisions.append(
+            [
+                str(len(decisions) + 1),
+                "Decide the card payoff order",
+                f"Card balances total {fmt_dollar(debt_total)} at up to "
+                f"{max(d.apr for d in debts)}% APR; {worst.label} sits at {util}. Minimums and due dates are "
+                "in the Bills & Debt Calendar - decide which card gets any extra payment.",
+            ]
+        )
+    pdf.draw_table(
+        ["#", "Decision", "Why now"],
+        decisions[:3],
+        col_widths=[8, 44, 134],
+        col_aligns=["R", "L", "L"],
+        row_font_size=7.5,
+    )
+
+    pdf.ln(2)
+    pdf.sub_title("Due in the next 30 days")
+    upcoming = [c for c in bill_calendar(result, repeating, estimated, end, days=30) if c.kind != "Payday (estimated)"]
+    paydays = [c for c in bill_calendar(result, repeating, estimated, end, days=30) if "Payday" in c.kind]
+    if upcoming:
+        pdf.draw_table(
+            ["Date", "Item", "Amount", "Kind", "Status"],
+            [[f"{c.when:%m/%d/%Y}", c.item, fmt_dollar(c.amount), c.kind, c.status] for c in upcoming],
+            col_widths=[22, 74, 24, 30, 36],
+            col_aligns=["L", "L", "R", "L", "L"],
+            row_font_size=7.5,
+        )
+    pdf.body_text(
+        f"{len(upcoming)} scheduled outflow(s) totalling "
+        f"{fmt_dollar(sum((c.amount for c in upcoming), Decimal('0')))}; "
+        f"{len(paydays)} estimated payday(s) totalling {fmt_dollar(sum((c.amount for c in paydays), Decimal('0')))}. "
+        "Everything not individually scheduled (fuel, food, checks, ...) is covered by the allowances on the "
+        "forecast page.",
+        size=7.5,
+    )
+
+    pdf.ln(2)
+    pdf.sub_title("Missing information")
+    missing_rows: list[list[str]] = []
+    gaps = [
+        (_ledger_short(led), label) for led in result.ledgers for label in missing_coverage(led, end.year, end.month)
+    ]
+    for acct, label in gaps:
+        missing_rows.append([f"{acct} statement for {label}", "Activity and balance unknown for that month"])
+    if totals["deposits"] > 0:
+        missing_rows.append(
+            [
+                f"Source of {fmt_dollar(totals['deposits'])} in deposits that are not identified payroll",
+                "Confirm before treating them as earned income",
+            ]
+        )
+    if checks_unknown:
+        missing_rows.append(
+            [
+                f"Payee and purpose of {len(checks_unknown)} check(s), "
+                f"{fmt_dollar(sum((c.amount for c in checks_unknown), Decimal('0')))}",
+                "Add them to checks.yaml so spending by category reflects what they paid for",
+            ]
+        )
+    outside: dict[str, Decimal] = defaultdict(Decimal)
+    for m in result.movements:
+        if (
+            not m.matched
+            and m.unmatched_reason
+            and ("not covered" in m.unmatched_reason or "PayPal" in m.unmatched_reason)
+        ):
+            outside[m.unmatched_reason] += m.amount
+    for reason, amount in sorted(outside.items(), key=lambda kv: -kv[1]):
+        missing_rows.append(
+            [f"{fmt_dollar(amount)} in transfers: {reason}", "Provide those statements or confirm the purpose"]
+        )
+    other = [t for t in result.all_transactions if t.category == "Other"]
+    if other:
+        missing_rows.append(
+            [
+                f"Category for {len(other)} uncategorized item(s), "
+                f"{fmt_dollar(sum((t.amount for t in other), Decimal('0')))}",
+                "Listed under Items Needing Review",
+            ]
+        )
+    if missing_rows:
+        pdf.draw_table(
+            ["What is missing", "Why it matters"],
+            missing_rows,
+            col_widths=[104, 82],
+            col_aligns=["L", "L"],
+            row_font_size=7.5,
+        )
+    else:
+        pdf.body_text("Nothing outstanding - every account and month is covered and every check is annotated.", size=8)
+
+
+def _render_subscription_review(pdf: ReportPDF, result: ConsolidatedResult, end: date) -> None:
+    """Every subscription service with its cost, cadence and a keep/cancel column."""
+    repeating = detect_repeating_payments(result.all_transactions, as_of=end)
+    rows = subscription_review(result, repeating, end)
+    if not rows:
+        return
+    pdf.add_page()
+    pdf.section_title("Subscription Review")
+    pdf.body_text(
+        "Every debit categorized as Subscriptions, grouped by service across all accounts. \u201cRecent $/mo\u201d "
+        "is the trailing 90 days divided by three, so a service that was cancelled shows $0.00. \u201cNext "
+        "expected\u201d is the detected schedule where one exists (blank when the charges are irregular). The "
+        "last column is for your decision.",
+        size=8,
+    )
+    table = [
+        [
+            r.payee,
+            r.accounts,
+            str(r.charges),
+            fmt_dollar(r.total),
+            fmt_dollar(r.recent_monthly),
+            f"{r.last_date:%m/%d/%Y}",
+            f"{r.next_expected:%m/%d/%Y}" if r.next_expected else "\u2013",
+            _cadence_label(r.cadence_days) if r.cadence_days else "irregular",
+            "",
+        ]
+        for r in rows
+    ]
+    table.append(
+        [
+            "Total",
+            "",
+            str(sum(r.charges for r in rows)),
+            fmt_dollar(sum((r.total for r in rows), Decimal("0"))),
+            fmt_dollar(sum((r.recent_monthly for r in rows), Decimal("0"))),
+            "",
+            "",
+            "",
+            "",
+        ]
+    )
+    pdf.draw_table(
+        ["Service", "Acct", "Charges", "Total", "Recent $/mo", "Last charge", "Next expected", "Cadence", "Keep?"],
+        table,
+        col_widths=[46, 12, 14, 20, 20, 20, 22, 20, 12],
+        col_aligns=["L", "L", "R", "R", "R", "L", "L", "L", "C"],
+        section_label="Subscription Review",
+        header_font_size=6.5,
+        row_font_size=7,
+    )
+
+
+def _render_bills_and_debt(pdf: ReportPDF, result: ConsolidatedResult, end: date) -> None:
+    """Debt log (per card) and a 60-day calendar of bills, minimums and paydays."""
+    repeating = detect_repeating_payments(result.all_transactions, as_of=end)
+    estimated = estimate_income_groups(result.all_transactions, end)
+    debts = debt_log(result)
+    calendar = bill_calendar(result, repeating, estimated, end, days=60)
+    if not debts and not calendar:
+        return
+    pdf.add_page()
+    pdf.section_title("Bills & Debt Calendar")
+    if debts:
+        pdf.sub_title("Debt log")
+        pdf.draw_table(
+            ["Card", "As of", "Balance", "Limit", "Used", "APR", "Min. due", "Due date", "Autopay", "Last payment"],
+            [
+                [
+                    d.label,
+                    d.as_of,
+                    fmt_dollar(d.balance),
+                    fmt_dollar(d.credit_limit) if d.credit_limit else "\u2013",
+                    f"{d.utilization}%" if d.utilization is not None else "\u2013",
+                    f"{d.apr}%" if d.apr else "\u2013",
+                    fmt_dollar(d.minimum_payment) if d.minimum_payment else "\u2013",
+                    d.due_date or "\u2013",
+                    "detected" if d.autopay else "not seen",
+                    f"{fmt_dollar(d.last_payment_amount)} on {d.last_payment_date}"
+                    if d.last_payment_date
+                    else "\u2013",
+                ]
+                for d in debts
+            ],
+            col_widths=[34, 18, 18, 16, 12, 14, 16, 18, 16, 24],
+            col_aligns=["L", "L", "R", "R", "R", "R", "R", "L", "L", "L"],
+            header_font_size=6.5,
+            row_font_size=7,
+        )
+        pdf.body_text(
+            "Balance, limit, APR, minimum and due date are read from each card's latest statement. "
+            "\u201cAutopay detected\u201d means a payment from the checking account was matched to the card's "
+            "payment credit; it does not confirm the autopay amount covers the minimum - check that the "
+            "scheduled payment is at least the minimum due. Paying only the minimum at ~30% APR keeps "
+            "interest accruing; the Interest lines in each card month show the cost.",
+            size=7.5,
+        )
+        pdf.ln(2)
+    if calendar:
+        pdf.sub_title("Next 60 days")
+        pdf.body_text(
+            "Bills are the active recurring payments; card minimums come from the statements; paydays are "
+            "estimated from the recent pay pattern. Add due dates for bills paid by check or from accounts "
+            "outside these statements - they cannot be detected here.",
+            size=7.5,
+        )
+        pdf.draw_table(
+            ["Date", "Item", "In/Out", "Amount", "Kind", "Status", "Basis"],
+            [
+                [
+                    f"{c.when:%m/%d/%Y}",
+                    c.item,
+                    "+" if "Payday" in c.kind else "\u2212",
+                    fmt_dollar(c.amount),
+                    c.kind,
+                    c.status,
+                    c.basis,
+                ]
+                for c in calendar
+            ],
+            col_widths=[20, 58, 12, 22, 26, 26, 22],
+            col_aligns=["L", "L", "C", "R", "L", "L", "L"],
+            section_label="Bills & Debt Calendar",
+            header_font_size=6.5,
+            row_font_size=7,
+        )
+
+
+def _render_checks(pdf: ReportPDF, result: ConsolidatedResult, annotations: dict[int, dict[str, str]]) -> None:
+    """Register of cleared checks with payee/purpose where annotated."""
+    rows = check_register(result, annotations)
+    if not rows:
+        return
+    pdf.add_page()
+    pdf.section_title("Checks \u2013 Payees and Purposes")
+    unknown = [r for r in rows if not r.payee]
+    pdf.body_text(
+        f"{len(rows)} check(s) cleared for {fmt_dollar(sum((r.amount for r in rows), Decimal('0')))}. The bank "
+        "statement records only the check number and amount, so the payee and purpose have to come from you. "
+        "The check number stays as the payment method; once a purpose is supplied the amount is categorized "
+        "by what it paid for (e.g. Rent) instead of sitting in \u201cChecks\u201d."
+        + (
+            f" {len(unknown)} check(s) totalling {fmt_dollar(sum((r.amount for r in unknown), Decimal('0')))} still "
+            "have no payee - add them to checks.yaml (see README)."
+            if unknown
+            else ""
+        ),
+        size=8,
+    )
+    pdf.draw_table(
+        ["Date", "Check #", "Amount", "Payee", "Purpose", "Account", "Source row"],
+        [
+            [
+                r.date,
+                f"#{r.number}",
+                fmt_dollar(r.amount),
+                r.payee or "unknown \u2013 supply",
+                r.purpose or "unknown",
+                r.account,
+                r.source or "\u2013",
+            ]
+            for r in rows
+        ],
+        col_widths=[20, 14, 20, 36, 26, 32, 38],
+        col_aligns=["L", "L", "R", "L", "L", "L", "L"],
+        section_label="Check Register",
+        row_font_size=7,
+    )
 
 
 def _render_items_needing_review(pdf: ReportPDF, result: ConsolidatedResult, mask_personal: bool = False) -> None:
@@ -1072,19 +1599,40 @@ def _render_items_needing_review(pdf: ReportPDF, result: ConsolidatedResult, mas
             )
 
     for movement in result.movements:
-        if movement.matched:
-            continue
         from_ledger = result.ledger_for(movement.from_account)
         label = _ledger_short(from_ledger) if from_ledger else movement.from_account
+        source = _movement_source(result, movement)
+        if movement.matched and movement.basis == "amount+date":
+            to_ledger = result.ledger_for(movement.to_account)
+            rows.append(
+                [
+                    label,
+                    movement.date,
+                    fmt_dollar(movement.amount),
+                    movement.description[:60],
+                    f"Paired with {_ledger_short(to_ledger) if to_ledger else movement.to_account} credit on "
+                    f"{movement.counter_date} ({movement.counter_description[:30]}) by equal amount and date only "
+                    "\u2013 no shared reference number",
+                    source,
+                    "Verify pairing",
+                ]
+            )
+            continue
+        if movement.matched:
+            continue
+        reason = movement.unmatched_reason or "no offsetting credit found in the covered accounts"
+        status = "Needs statement" if "no statement covering" in reason else "External \u2013 confirm"
+        if reason.startswith("no offsetting credit found"):
+            status = "Unresolved"
         rows.append(
             [
                 label,
                 movement.date,
                 fmt_dollar(movement.amount),
                 movement.description[:60],
-                "Transfer/card payment with no offsetting credit on a covered account",
-                "Movement log",
-                "Unresolved",
+                f"Transfer/card payment without an offsetting credit: {reason}",
+                source,
+                status,
             ]
         )
 
@@ -1105,8 +1653,21 @@ def _render_items_needing_review(pdf: ReportPDF, result: ConsolidatedResult, mas
     )
 
 
-def _statement_source_for(ledger: AccountLedger, tx: Transaction) -> str:
-    """Locate the statement file whose period includes a transaction."""
+def _source_ref(stmt: Statement | None, tx: Transaction | None = None) -> str:
+    """Exact provenance: file name, PDF page and row ordinal when known."""
+    if stmt is None:
+        return "\u2013"
+    name = Path(stmt.file_path).name if stmt.file_path else f"statement {stmt.statement_date}"
+    if tx is not None and tx.source_page:
+        return f"{name} p.{tx.source_page} row {tx.source_row}"
+    return name
+
+
+def _statement_for_tx(ledger: AccountLedger, tx: Transaction) -> Statement | None:
+    """The statement that lists a transaction (by identity, then by period)."""
+    for stmt in ledger.statements:
+        if any(t is tx for t in stmt.transactions):
+            return stmt
     tx_date = _to_date(tx.post_date)
     best: Statement | None = None
     for stmt in ledger.statements:
@@ -1116,11 +1677,29 @@ def _statement_source_for(ledger: AccountLedger, tx: Transaction) -> str:
             if best is None or _to_date(best.statement_date) > end:
                 best = stmt
         elif best is None and end >= tx_date:
-            if best is None or _to_date(best.statement_date) > end:
-                best = stmt
-    if best and best.file_path:
-        return Path(best.file_path).name
-    return f"statement {best.statement_date}" if best else "\u2013"
+            best = stmt
+    return best
+
+
+def _statement_source_for(ledger: AccountLedger, tx: Transaction) -> str:
+    """Locate the statement row a transaction was read from."""
+    return _source_ref(_statement_for_tx(ledger, tx), tx)
+
+
+def _movement_source(result: ConsolidatedResult, movement: MovementMatch) -> str:
+    """Source reference for the debit side of an internal movement."""
+    ledger = result.ledger_for(movement.from_account)
+    if ledger is None:
+        return "\u2013"
+    for tx in ledger.transactions:
+        if (
+            not tx.is_credit
+            and tx.post_date == movement.date
+            and tx.amount == movement.amount
+            and tx.description == movement.description
+        ):
+            return _statement_source_for(ledger, tx)
+    return "\u2013"
 
 
 def _render_corrections_log(pdf: ReportPDF, result: ConsolidatedResult, mask_personal: bool = False) -> None:
@@ -1239,6 +1818,7 @@ def generate_report(
     allow_mismatch: bool = False,
     transactions_csv_path: str | Path | None = None,
     budget_path: str | Path | None = None,
+    checks_path: str | Path | None = None,
 ) -> bool:
     """Generate the personal financial report PDF (and optional audit CSV).
 
@@ -1260,6 +1840,8 @@ def generate_report(
 
     statements.sort(key=lambda s: (s.year, s.month, s.account_number))
     categorize_transactions(statements)
+    check_annotations = load_check_annotations(checks_path)
+    apply_check_annotations(statements, check_annotations)
 
     # Per-statement reconciliation
     reconciled = _reconcile_statements(statements)
@@ -1417,7 +1999,7 @@ def generate_report(
     if gaps:
         pdf.sub_title("Missing Statement Coverage")
         pdf.draw_table(
-            ["Account", "Calendar Month with No Data"],
+            ["Account", "Statement not provided for"],
             [[a, m] for a, m in gaps],
             col_widths=[55, 55],
             col_aligns=["L", "L"],
@@ -1425,8 +2007,9 @@ def generate_report(
             row_height=5.5,
         )
         pdf.body_text(
-            "The report ends as of the latest statement date, but the account/months above have no "
-            "statement. Balances and totals for those months are not included.",
+            "These statements were not provided, so the account's activity and balances for those months "
+            "are unknown - this is a gap in the data, not evidence of zero activity. Combined figures that "
+            "include those months are marked as incomplete wherever they appear.",
             size=8,
         )
     else:
@@ -1440,8 +2023,9 @@ def generate_report(
     else:
         pdf.body_text("Reconciliation: FAILED (see Reconciliation & Data Quality page)", size=9)
 
-    # ---- PERIOD OVERVIEW CHARTS ----
+    # ---- ACTION SUMMARY + DASHBOARD ----
     if mode in ("combined", "yearly"):
+        _render_action_summary(pdf, result, cover_end_d, check_annotations)
         _render_dashboard(pdf, result, cover_start_d, cover_end_d)
         _render_budget(pdf, load_budget(budget_path), result, cover_start_d, cover_end_d)
 
@@ -1459,14 +2043,18 @@ def generate_report(
         chart_buf.close()
 
         pdf.add_page(orientation="L")
-        pdf.section_title(f"{period_label} \u2013 Weekly Average Balance")
+        pdf.section_title(f"{period_label} \u2013 Weekly Average Balances")
         weekly_chart = chart_weekly_balance_ledgers(result.ledgers)
         pdf.embed_chart(
             weekly_chart,
             w=pdf.w - pdf.l_margin - pdf.r_margin,
-            caption="Daily balance per account is reconstructed from each statement's beginning balance "
-            "after deduplicating overlaps; the covered period is "
-            f"{cover_start_d:%B %d, %Y} through {cover_end_d:%B %d, %Y}.",
+            caption="Three separate measures, never added together: \u201cCash & savings\u201d is the sum of "
+            "the checking and savings balances; \u201cCard balances owed\u201d is the sum of the Capital One "
+            "balances (debt, shown as a positive amount); \u201cNet position\u201d is cash minus card debt. "
+            "Each is a weekly average of daily balances reconstructed from each statement's beginning "
+            "balance after deduplicating overlaps. Dotted segments are weeks where an account in that group "
+            "has no statement (e.g. savings in July/August), so the value covers fewer accounts. Covered "
+            f"period: {cover_start_d:%B %d, %Y} through {cover_end_d:%B %d, %Y}.",
         )
         weekly_chart.close()
 
@@ -1505,8 +2093,11 @@ def generate_report(
             section_label="Top Payees by Total Debits",
         )
 
-    # ---- INSIGHTS: REVIEW + RECURRING/FORECAST ----
+    # ---- INSIGHTS: SUBSCRIPTIONS, BILLS & DEBT, CHECKS, REVIEW, FORECAST ----
     if mode in ("combined", "yearly"):
+        _render_subscription_review(pdf, result, cover_end_d)
+        _render_bills_and_debt(pdf, result, cover_end_d)
+        _render_checks(pdf, result, check_annotations)
         _render_items_needing_review(pdf, result, mask_personal=mask_personal)
         _render_recurring_and_forecast(pdf, result, cover_end_d)
 
@@ -1620,6 +2211,20 @@ def generate_report(
                         section_label="Top Payees by Total Debits",
                     )
 
+                # Checks cleared in this month (short table; placed before the long
+                # transaction list so it never ends up alone on a spill-over page)
+                month_checks = checks_by_month.get((month.year, month.month))
+                if month_checks:
+                    pdf.sub_title("Checks Cleared")
+                    chk_rows = [[c["date"], f"#{c['number']}", fmt_dollar(c["amount"])] for c in month_checks]
+                    pdf.draw_table(
+                        ["Date", "Check #", "Amount"],
+                        chk_rows,
+                        col_widths=[30, 30, 30],
+                        col_aligns=["L", "C", "R"],
+                        section_label="Checks Cleared",
+                    )
+
                 # Transactions — complete, oldest first, so the Balance column reads
                 # like a bank ledger (each row's balance follows the previous row's).
                 pdf.sub_title("Transactions")
@@ -1640,18 +2245,18 @@ def generate_report(
                     raw_desc = tx.description
                     if mask_personal:
                         raw_desc = _mask_desc(raw_desc)
-                    desc = raw_desc[:52] + ("..." if len(raw_desc) > 52 else "")
+                    desc = raw_desc[:90] + ("..." if len(raw_desc) > 90 else "")
                     sign = "+" if tx.is_credit else "-"
                     tx_rows.append(
                         [
                             tx.post_date,
                             desc,
-                            tx.category[:18],
+                            tx.category,
                             f"{sign}{fmt_dollar(tx.amount)}",
                             fmt_dollar(run_balances[id(tx)]),
                         ]
                     )
-                cw_tx = [22, 66, 26, 26, 26]
+                cw_tx = [20, 76, 34, 28, 28]
                 pdf.draw_table(
                     ["Date", "Description", "Category", "Amount", "Balance"],
                     tx_rows,
@@ -1663,30 +2268,19 @@ def generate_report(
                     row_height=5.0,
                 )
 
-                # Checks cleared in this month
-                month_checks = checks_by_month.get((month.year, month.month))
-                if month_checks:
-                    pdf.sub_title("Checks Cleared")
-                    chk_rows = [[c["date"], f"#{c['number']}", fmt_dollar(c["amount"])] for c in month_checks]
-                    cw_chk = [30, 30, 30]
-                    pdf.draw_table(
-                        ["Date", "Check #", "Amount"],
-                        chk_rows,
-                        col_widths=cw_chk,
-                        col_aligns=["L", "C", "R"],
-                    )
-
     # ---- SAVE ----
     run_maps_audit: dict[int, Decimal] = {}
+    seq_maps_audit: dict[int, int] = {}
     for ledger in result.ledgers:
         run_maps_audit.update(running_balance_map(ledger))
+        seq_maps_audit.update({id(tx): seq for seq, tx in enumerate(ledger.transactions, start=1)})
 
     attachments = []
     if transactions_csv_path:
         _write_transactions_csv(result, transactions_csv_path, mask_personal)
         attachments.append(transactions_csv_path)
     if audit_path:
-        _write_audit_csv(statements, audit_path, mask_personal, run_maps_audit)
+        _write_audit_csv(statements, audit_path, mask_personal, run_maps_audit, seq_maps_audit)
         attachments.append(audit_path)
 
     # Package the companion CSVs inside the PDF so a standalone PDF carries
@@ -1733,10 +2327,25 @@ def _post_render_checks(result: ConsolidatedResult, as_of: date, pdf: ReportPDF 
         problems.extend(pdf.render_problems)
 
     totals = dashboard_totals(result, as_of)
+    flow = _flow_split(result)
     checks += 1
-    parts = totals["earned_income"] + totals["refunds"] + totals["transfers_in"] + totals["other_credits"]
+    parts = (
+        totals["payroll"] + totals["deposits"] + totals["refunds"] + totals["transfers_in"] + totals["other_credits"]
+    )
     if parts != totals["total_credits"]:
         problems.append(f"credit decomposition does not sum to Total Credits ({parts} vs {totals['total_credits']})")
+    checks += 1
+    debit_parts = (
+        flow["spending"] + flow["matched_card"] + flow["other_debt"] + flow["matched_transfer"] + flow["unmatched"]
+    )
+    if debit_parts != totals["total_debits"]:
+        problems.append(f"debit decomposition does not sum to Total Debits ({debit_parts} vs {totals['total_debits']})")
+    checks += 1
+    bridge = _income_to_cash_bridge(totals, flow)
+    steps = sum((amt for label, amt in bridge if not label.startswith("=")), Decimal("0"))
+    observed = bridge[-1][1]
+    if steps != observed:
+        problems.append(f"income-to-cash bridge does not sum to the observed change ({steps} vs {observed})")
 
     series = month_series(result.ledgers)
     checks += 1
@@ -1792,25 +2401,36 @@ def _write_transactions_csv(
     transactions_path: str | Path,
     mask_personal: bool,
 ) -> None:
-    """Write the consolidated, deduplicated transactions to CSV."""
+    """Write the consolidated, deduplicated transactions to CSV.
+
+    Rows are written in the ledger's calculation order - the same sequence
+    the PDF tables and running balances use - and carry that ordinal in
+    ``Seq`` so consecutive-row balance checks hold in the export exactly as
+    they do in the report. ``Source`` points at the statement file, page and
+    row the transaction was read from.
+    """
     with open(transactions_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["Account", "Account Type", "Date", "Description", "Category", "Amount", "Type", "Balance"])
+        writer.writerow(
+            ["Account", "Account Type", "Seq", "Date", "Description", "Category", "Amount", "Type", "Balance", "Source"]
+        )
         for ledger in result.ledgers:
             run_balances = running_balance_map(ledger)
-            for tx in sorted(ledger.transactions, key=lambda t: (_to_date(t.post_date), str(t.amount))):
+            for seq, tx in enumerate(ledger.transactions, start=1):
                 desc = _mask_desc(tx.description) if mask_personal else tx.description
                 amount = tx.amount if tx.is_credit else -tx.amount
                 writer.writerow(
                     [
                         ledger.account_number,
                         ledger.account_type,
+                        seq,
                         tx.post_date,
                         desc,
                         tx.category,
                         str(amount),
                         "Credit" if tx.is_credit else "Debit",
                         str(run_balances[id(tx)]),
+                        _statement_source_for(ledger, tx),
                     ]
                 )
     print(f"Transactions CSV saved to: {transactions_path}")
@@ -1842,24 +2462,42 @@ def _write_audit_csv(
     audit_path: str | Path,
     mask_personal: bool,
     run_maps: dict[int, Decimal] | None = None,
+    seq_maps: dict[int, int] | None = None,
 ) -> None:
-    """Write a CSV of every transaction with its category.
+    """Write a CSV of every parsed row (statement order) with its category.
 
     ``Balance`` is the value the bank printed on the statement (where one was
     printed); ``Running`` is the report's recomputed per-transaction running
-    balance, so printed vs report-generated values stay distinguishable.
+    balance and ``Seq`` the row's position in the ledger's calculation order
+    (blank for rows dropped as duplicates), so printed vs report-generated
+    values stay distinguishable and the two CSVs can be joined.
     """
     run_maps = run_maps or {}
+    seq_maps = seq_maps or {}
     with open(audit_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(
-            ["Account", "Statement", "PostDate", "Description", "Amount", "Type", "Balance", "Category", "Running"]
+            [
+                "Account",
+                "Statement",
+                "PostDate",
+                "Description",
+                "Amount",
+                "Type",
+                "Balance",
+                "Category",
+                "Running",
+                "Seq",
+                "Source",
+            ]
         )
         for stmt in statements:
+            name = Path(stmt.file_path).name if stmt.file_path else f"statement {stmt.statement_date}"
             for tx in stmt.transactions:
                 desc = _mask_desc(tx.description) if mask_personal else tx.description
                 amount = tx.amount if tx.is_credit else -tx.amount
                 running = run_maps.get(id(tx))
+                seq = seq_maps.get(id(tx))
                 writer.writerow(
                     [
                         stmt.account_number,
@@ -1871,17 +2509,8 @@ def _write_audit_csv(
                         str(tx.balance) if tx.balance is not None else "",
                         tx.category,
                         str(running) if running is not None else "",
+                        str(seq) if seq is not None else "",
+                        f"{name} p.{tx.source_page} row {tx.source_row}" if tx.source_page else name,
                     ]
                 )
     print(f"Audit file saved to: {audit_path}")
-
-    # Show Other transactions
-    other_tx = [(s.month_label, tx) for s in statements for tx in s.transactions if tx.category == "Other"]
-    if other_tx:
-        print(f"\n{len(other_tx)} transaction(s) categorized as Other:", file=sys.stderr)
-        for month, tx in other_tx:
-            print(
-                f"  [{month}] {tx.post_date}  {tx.description[:90]}  "
-                f"{'credit' if tx.is_credit else 'debit'} {tx.amount}",
-                file=sys.stderr,
-            )

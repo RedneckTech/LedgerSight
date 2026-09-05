@@ -46,9 +46,86 @@ def _is_page_artifact(line: str, stripped: str) -> bool:
         return True
     if re.match(r"^\d{1,2}\s*$", stripped):
         return True
-    if re.match(r"[A-Z]{2}\s+\d{5}", stripped) and len(stripped) < 20:
-        return True
+    if re.match(r"^[A-Z]{2}\s+\d{5}(?:-\d{4})?$", stripped):
+        return True  # address footer "IA 52601" (not "OK 00865713 151124", a description tail)
     return False
+
+
+# A debit-card row's full text has two parts - "MERCHANT CITY ST 12345678 123456"
+# (POS rows print shorter references such as "600001 031333" or "1 287733")
+# and the memo "XX0844 DEBIT CARD mm/dd hh:mm" (or "XX0844 POS PINNED ...",
+# "XX0844 DDA WITHDRAWAL ...") - in either order. Transfers end with the
+# counterparty account and a short date ("... XXXXXX3608 6/24/26"). These
+# patterns tell an incomplete description from a complete one when the page
+# layout breaks the usual symmetry.
+_MEMO_KINDS = r"(?:DEBIT CARD|POS PINNED|DDA WITHDRAWAL)"
+_MEMO_FULL_RE = re.compile(rf"\bXX\d{{4}}\s+{_MEMO_KINDS}\s+\d{{2}}/\d{{2}}(?:\s+\d{{2}}:\d{{2}})?")
+_MEMO_FRAGMENT_RE = re.compile(r"\bXX\d{4}\b|\bDEBIT CARD\b|\bPOS PINNED\b|\bPINNED\b|\bDDA WITHDRAWAL\b")
+_REF_PAIR_RE = re.compile(r"\b\d{1,8}\s+\d{4,6}\b")
+_TRAILING_REF_RE = re.compile(r"\b\d{6,8}$")
+_XFER_TAIL_RE = re.compile(r"\b\d{1,2}/\d{1,2}/\d{2}\s*$")
+_NON_CARD_PREFIXES = ("MasterCard Cross Border Fee", "FEE FOR")
+_CONTINUATION_RES = (
+    # memo-only line, optionally led by the second half of a split reference:
+    # "PINNED 02/17 10:38", "DEBIT CARD 06/16 17:10", "048941 XX0844 POS PINNED 08/01 19:37"
+    re.compile(
+        r"^(?:\d{1,8}\s+)?(?:XX\d{4}\s+)?(?:DEBIT CARD|POS PINNED|PINNED|CARD|DDA WITHDRAWAL)"
+        r"\s+\d{2}/\d{2}(?:\s+\d{2}:\d{2})?$"
+    ),
+    # location + references, upper case, at most three words of city/phone:
+    # "NEWARK NJ 41860326 812703", "SAN FRANCISCO CA 67616426 553076",
+    # "4029357733 CA 05530267 403601", "OK 00865713 151124". A merchant-first
+    # line ("GOOGLE DramaBox Mountain View CA 64925886 329831") has more
+    # words and lower case.
+    re.compile(r"^(?:[A-Z0-9][A-Z0-9.'&-]*\s+){0,3}[A-Z]{2}\s+\d{1,8}\s+\d{4,6}$"),
+    # bare reference pair: "40683082 506947"
+    re.compile(r"^\d{1,8}\s+\d{4,6}$"),
+    # memo date/time left over when the memo wrapped after "DEBIT CARD": "07/06 07:21"
+    re.compile(r"^\d{2}/\d{2}\s+\d{2}:\d{2}$"),
+    # transfer tail: "6/24/26", "XXXXXX3608 6/24/26"
+    re.compile(r"^(?:X{4,}\d{4}\s+)?\d{1,2}/\d{1,2}/\d{2}$"),
+)
+_START_RES = (
+    # memo followed by merchant text: "XX0844 DEBIT CARD 08/03 06:40 GOOGLE My Drama"
+    re.compile(rf"^XX\d{{4}}\s+{_MEMO_KINDS}\s+\d{{2}}/\d{{2}}(?:\s+\d{{2}}:\d{{2}})?\s+\S"),
+    re.compile(r"^\d{6}\s+WEB XFER\b"),
+    re.compile(
+        r"^(?:DEPOSIT|SERVICE CHARGE|MISCELLANEOUS DEBIT|CAPITAL ONE|FEE FOR|MasterCard Cross Border"
+        r"|PAYPAL (?:PURCHASE|INST XFER)|RICHERS TRUCKING|SALES TAX)\b"
+    ),
+)
+
+
+def _description_incomplete(desc: str) -> bool:
+    """True when a First Interstate description is visibly missing a part."""
+    has_fragment = bool(_MEMO_FRAGMENT_RE.search(desc))
+    memo_first = _MEMO_FULL_RE.match(desc)
+    has_full_memo = bool(_MEMO_FULL_RE.search(desc))
+    has_refs = bool(_REF_PAIR_RE.search(desc))
+    non_card = desc.startswith(_NON_CARD_PREFIXES)
+    if has_fragment and not has_full_memo:
+        return True  # "... XX0844 POS", "... XX0844 DEBIT", "... XX0844"
+    if memo_first and "DDA" not in memo_first.group(0) and not _REF_PAIR_RE.search(desc[memo_first.end() :]):
+        return True  # "XX0844 DEBIT CARD 06/22 21:31 OPENAI CHATGPT SAN" (merchant tail missing)
+    if has_refs and not has_fragment and not non_card:
+        return True  # "GOOGLE DramaBox Mountain View CA 64925886 225666" (memo missing)
+    if not has_fragment and not non_card and _TRAILING_REF_RE.search(desc):
+        return True  # "WESTLAND THEATRE WEST BURLINGT IA 08102091" (reference split across lines)
+    if "WEB XFER" in desc and not _XFER_TAIL_RE.search(desc):
+        return True  # "649104 WEB XFER FROM REGULAR SAVINGS" (account/date tail missing)
+    if "DDA WITHDRAWAL" in desc and not has_refs:
+        return True  # "FEE FOR DDA WITHDRAWAL 07/31 20:39 715 HIGHWAY" (location tail missing)
+    return False
+
+
+def _looks_like_continuation(line: str) -> bool:
+    """True when a line can only be the tail of a description, never its start."""
+    return any(rx.match(line) for rx in _CONTINUATION_RES)
+
+
+def _looks_like_start(line: str) -> bool:
+    """True when a line can only begin a description, never continue one."""
+    return any(rx.match(line) for rx in _START_RES)
 
 
 def parse_statement(text: str, file_path: str = "") -> Statement:
@@ -114,26 +191,33 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
             break
 
     # ---- Account Activity ----
+    #
+    # Layout (pdftotext -layout): each dated row is vertically centred against
+    # its wrapped description cell. A one-line description prints ON the dated
+    # row; a two-line description prints its first line ABOVE the dated row
+    # and its second line BELOW it (three lines: above / inline / below). So a
+    # transaction owes exactly as many continuation lines after its dated row
+    # as it had description lines before it. Tracking that count is what keeps
+    # "NEWARK NJ 41860326 812703" attached to the Audible charge instead of
+    # being glued onto the front of the next row's description.
     transactions: list[Transaction] = []
     in_activity = False
     activity_started = False
     header_positions: dict[str, int] = {}
-    desc_buffer: list[str] = []
-    drain_to_misc = False
+    desc_buffer: list[str] = []  # description lines printed above the next dated row
+    pending_below = 0  # continuation lines still owed to transactions[-1]
+    page = 1  # pdftotext separates pages with a form feed
 
     for line in lines:
+        if "\x0c" in line:
+            page += line.count("\x0c")
         if "Account Activity" in line and not activity_started:
             in_activity = True
             activity_started = True
             continue
         if not in_activity:
             continue
-        if "Checks Cleared" in line:
-            if desc_buffer and transactions:
-                extra = _clean_description(" ".join(desc_buffer))
-                if extra:
-                    transactions[-1].description = _clean_description(f"{transactions[-1].description} {extra}")
-                desc_buffer.clear()
+        if "Checks Cleared" in line or "Daily Balances" in line:
             break
         if not line.strip():
             continue
@@ -153,6 +237,7 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
             # Skip balance-marker lines inside activity
             if "Beginning Balance" in line or "Ending Balance" in line:
                 desc_buffer.clear()
+                pending_below = 0
                 continue
 
             amounts = list(re.finditer(r"\$[\d,]+\.\d{2}", line))
@@ -192,27 +277,14 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
                 elif beginning_balance:
                     is_credit = balance > beginning_balance
 
-            # Build full description
-            desc_parts = list(desc_buffer)
+            # Build the description: lines printed above this dated row, then
+            # any text on the row itself. The same number of lines will follow.
+            above = list(desc_buffer)
+            desc_buffer.clear()
             current_desc = line[date_match.end() : amounts[-2].start()].strip()
-            has_own_desc = bool(current_desc)
-
-            if has_own_desc:
-                # desc_buffer lines belong to the PREVIOUS transaction
-                if transactions:
-                    stray_text = " ".join(desc_parts).strip()
-                    if stray_text:
-                        tx = transactions[-1]
-                        tx.description = _clean_description(f"{tx.description} {stray_text}")
-                desc_buffer.clear()
-                description = _clean_description(current_desc)
-            else:
-                # desc_buffer lines are THIS transaction's description
-                if current_desc:
-                    desc_parts.append(current_desc)
-                description = " ".join(desc_parts).strip()
-                description = _clean_description(description)
-                desc_buffer.clear()
+            parts = above + ([current_desc] if current_desc else [])
+            description = _clean_description(" ".join(parts))
+            pending_below = len(above)
 
             transactions.append(
                 Transaction(
@@ -221,19 +293,34 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
                     amount=tx_amount,
                     is_credit=is_credit,
                     balance=balance,
+                    source_page=page,
+                    source_row=len(transactions) + 1,
                 )
             )
-            # Rows whose description column stayed empty or only holds the
-            # placeholder 'MISCELLANEOUS DEBIT' print their real detail on
-            # the lines that FOLLOW the dated row, so drain those lines into
-            # this transaction instead of leaving them for the next row.
-            drain_to_misc = not description or description == "MISCELLANEOUS DEBIT"
         else:
             stripped = line.strip()
             if stripped and not _is_page_artifact(line, stripped):
-                if drain_to_misc and transactions:
-                    tx = transactions[-1]
-                    tx.description = _clean_description(f"{tx.description} {stripped}")
+                last = transactions[-1] if transactions else None
+                if last is not None and pending_below > 0:
+                    if not _description_incomplete(last.description) and _looks_like_start(stripped):
+                        # Symmetry over-counted (the row was already complete
+                        # and this line can only begin a record): start the
+                        # next record instead.
+                        pending_below = 0
+                        desc_buffer.append(stripped)
+                    else:
+                        last.description = _clean_description(f"{last.description} {stripped}")
+                        pending_below -= 1
+                elif (
+                    last is not None
+                    and not desc_buffer
+                    and _description_incomplete(last.description)
+                    and _looks_like_continuation(stripped)
+                ):
+                    # The dated row was merged with its first description line
+                    # (page bottom), so symmetry saw no lines above it; the
+                    # tail still follows - possibly on the next page.
+                    last.description = _clean_description(f"{last.description} {stripped}")
                 else:
                     desc_buffer.append(stripped)
 
@@ -358,7 +445,10 @@ def load_card_transactions(text: str) -> tuple[list[dict], list[dict]]:
     credits: list[dict] = []
     purchases: list[dict] = []
     section: str | None = None
+    page = 1
     for line in text.split("\n"):
+        if "\x0c" in line:
+            page += line.count("\x0c")
         stripped = line.strip()
         if not stripped:
             continue
@@ -382,12 +472,43 @@ def load_card_transactions(text: str) -> tuple[list[dict], list[dict]]:
             "post_date": m.group(2),
             "description": " ".join(m.group(3).split()),
             "amount": parse_amount(m.group(4)),
+            "page": page,
         }
         if section == "credits":
             credits.append(row)
         elif section == "purchases":
             purchases.append(row)
     return credits, purchases
+
+
+def _card_terms(text: str) -> tuple[str, Decimal, Decimal, Decimal]:
+    """(payment due date, minimum payment, credit limit, purchase APR %) from a card statement."""
+    due = ""
+    m = re.search(r"Payment Due Date:\s*([A-Z][a-z]{2} \d{1,2}, \d{4})", text)
+    if m:
+        due = _parse_card_date(m.group(1))
+    minimum = Decimal("0")
+    # The remittance stub prints "New Balance   Minimum Payment Due   Amount Enclosed"
+    # with the amounts on the following non-blank line.
+    lines = text.split("\n")
+    for idx, line in enumerate(lines):
+        if "Minimum Payment Due" in line and "New Balance" in line:
+            for nxt in lines[idx + 1 : idx + 4]:
+                amounts = re.findall(r"\$[\d,]+\.\d{2}", nxt)
+                if len(amounts) >= 2:
+                    minimum = parse_amount(amounts[1])
+                    break
+            if minimum:
+                break
+    limit = Decimal("0")
+    m = re.search(r"Credit Limit\s+\$([\d,]+\.\d{2})", text)
+    if m:
+        limit = parse_amount("$" + m.group(1))
+    apr = Decimal("0")
+    m = re.search(r"Purchases\s+(\d{1,2}\.\d{2})%", text)
+    if m:
+        apr = Decimal(m.group(1))
+    return due, minimum, limit, apr
 
 
 def parse_capone_statement(text: str, file_path: str = "") -> Statement:
@@ -413,6 +534,7 @@ def parse_capone_statement(text: str, file_path: str = "") -> Statement:
     cash_advances = _card_summary_amount(text, "Cash Advances")
     fees = _card_summary_amount(text, "Fees Charged")
     interest = _card_summary_amount(text, "Interest Charged")
+    due_date, minimum_payment, credit_limit, apr = _card_terms(text)
 
     creds, purch = load_card_transactions(text)
     stmt_year = int(statement_date.split("/")[2])
@@ -428,6 +550,8 @@ def parse_capone_statement(text: str, file_path: str = "") -> Statement:
                 amount=row["amount"],
                 is_credit=True,
                 balance=Decimal("0"),
+                source_page=row.get("page", 0),
+                source_row=len(transactions) + 1,
             )
         )
     for row in purch:
@@ -438,6 +562,8 @@ def parse_capone_statement(text: str, file_path: str = "") -> Statement:
                 amount=row["amount"],
                 is_credit=False,
                 balance=Decimal("0"),
+                source_page=row.get("page", 0),
+                source_row=len(transactions) + 1,
             )
         )
     if cash_advances > 0:
@@ -503,6 +629,10 @@ def parse_capone_statement(text: str, file_path: str = "") -> Statement:
         institution="Capital One",
         file_path=file_path,
         period_start="",
+        payment_due_date=due_date,
+        minimum_payment=minimum_payment,
+        credit_limit=credit_limit,
+        apr_purchases=apr,
     )
 
 

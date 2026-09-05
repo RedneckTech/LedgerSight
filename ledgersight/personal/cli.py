@@ -92,6 +92,13 @@ def main() -> None:
         help="Path to a budget.yaml with monthly income/category budgets "
         "(default: <directory>/budget.yaml when it exists)",
     )
+    parser.add_argument(
+        "--checks",
+        type=str,
+        default=None,
+        help="Path to a checks.yaml mapping check numbers to payee/category "
+        "(default: <directory>/checks.yaml when it exists)",
+    )
     args = parser.parse_args()
 
     pdf_files = _find_statement_pdfs(Path(args.directory))
@@ -170,6 +177,12 @@ def main() -> None:
         default_budget = os.path.join(args.directory, "budget.yaml")
         budget_path = default_budget if os.path.exists(default_budget) else None
 
+    if args.checks:
+        checks_path = args.checks
+    else:
+        default_checks = os.path.join(args.directory, "checks.yaml")
+        checks_path = default_checks if os.path.exists(default_checks) else None
+
     generate_report(
         statements,
         output,
@@ -181,4 +194,5 @@ def main() -> None:
         allow_mismatch=args.allow_mismatch,
         transactions_csv_path=transactions_csv_path,
         budget_path=budget_path,
+        checks_path=checks_path,
     )

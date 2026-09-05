@@ -513,9 +513,12 @@ class TransactionCategorizer:
 def normalize_merchant(description: str) -> str:
     """Normalize a transaction description into a merchant/customer name."""
     desc = description.upper()
-    desc = re.sub(r"XX\d{4}\s+(POS\s+)?PINNED\s+\d{2}/\d{2}\s+\d{2}:\d{2}\s*", "", desc)
-    desc = re.sub(r"XX\d{4}\s+DEBIT\s+CARD\s+\d{2}/\d{2}\s+\d{2}:\d{2}\s*", "", desc)
-    desc = re.sub(r"DEBIT\s+CARD\s+\d{2}/\d{2}\s+\d{2}:\d{2}\s*", "", desc)
+    # Bank memos: "XX0844 DEBIT CARD 06/22 21:31", "XX0844 POS PINNED 12/27 16:55",
+    # "XX0844 DDA WITHDRAWAL 08/01 17:36"; recurring charges may omit the time
+    # ("XX0844 DEBIT CARD 01/01").
+    desc = re.sub(r"XX\d{4}\s+(POS\s+)?PINNED\s+\d{2}/\d{2}(?:\s+\d{2}:\d{2})?\s*", "", desc)
+    desc = re.sub(r"XX\d{4}\s+(?:DEBIT\s+CARD|DDA\s+WITHDRAWAL)\s+\d{2}/\d{2}(?:\s+\d{2}:\d{2})?\s*", "", desc)
+    desc = re.sub(r"(?:DEBIT\s+CARD|DDA\s+WITHDRAWAL)\s+\d{2}/\d{2}(?:\s+\d{2}:\d{2})?\s*", "", desc)
     desc = re.sub(r"CARD\s+\d{2}/\d{2}\s+\d{2}:\d{2}\s*", "", desc)
     desc = re.sub(r"\b\d{2}/\d{2}\s+\d{2}:\d{2}\b", "", desc)
     desc = re.sub(r"\b[0-9A-F]{12,}\b", "", desc)

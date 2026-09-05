@@ -119,13 +119,28 @@ ledgersight --cli --profile personal -d data/Personal --year 2026 --mode combine
     --audit --csv -o data/Personal/personal_financial_report.pdf
 ```
 
-- `--audit` writes `<report>_audit.csv`: every parsed row with the bank-printed
-  balance (`Balance`) and the report's recomputed running balance (`Running`).
-- `--csv` writes `<report>_transactions.csv`: the deduplicated ledger, one row
-  per transaction, with running balances.
+- `--audit` writes `<report>_audit.csv`: every parsed row in statement order
+  with the bank-printed balance (`Balance`), the report's recomputed running
+  balance (`Running`), its position in the calculation order (`Seq`) and the
+  exact `Source` (file, PDF page, row).
+- `--csv` writes `<report>_transactions.csv`: the deduplicated ledger in the
+  same calculation order the PDF uses (`Seq`), so consecutive-row balance
+  checks hold in the export, with a `Source` reference per row.
 - Both CSVs are also embedded in the PDF as file attachments.
 - `--budget <path>` enables the Budget vs Actual page (defaults to
   `<directory>/budget.yaml` when that file exists).
+- `--checks <path>` annotates cleared checks with payee and purpose (defaults
+  to `<directory>/checks.yaml` when that file exists) - see below.
+
+The report opens with an Action Summary (next decisions, what is due in 30
+days, missing information), then the dashboard (credit/debit breakdown and an
+income-to-cash bridge that reconciles "income less categorized spending" to
+the observed change in cash and card debt), charts, a Subscription Review,
+a Bills & Debt Calendar (card balances, limits, APR, minimums, due dates,
+autopay evidence, 60-day calendar), the check register, items needing review,
+recurring payments with a forecast whose allowances come from complete
+statement months only, reconciliation, the corrections log, and finally the
+account-by-month ledger with per-row running balances.
 
 After rendering, the CLI runs export checks (all table rows drawn, nothing past
 the footer, credit decomposition sums to total credits, monthly series sums to
@@ -155,6 +170,22 @@ spending_monthly: 0.00         # optional overall cap; 0.00 = sum of the categor
 the report: every debit except internal transfers and loan/card payments
 (uncategorized items are included). "Income" is earned income - Payroll,
 Deposit and Government credits with refunds excluded.
+
+#### checks.yaml schema
+
+Bank statements record only a check's number and amount. Supplying the payee
+and purpose keeps the check number as the payment method while categorizing
+the amount by what it paid for:
+
+```yaml
+checks:
+  5125: {payee: "Landlord", category: "Rent"}
+  5056: {payee: "Farm Bureau", category: "Insurance", note: "6-month premium"}
+  5127: "Cash"              # payee only; the category stays "Checks"
+```
+
+Numbers may be written with or without a leading `#`. Unannotated checks are
+listed on the Checks page and in the Action Summary as missing information.
 
 ## Configuration
 

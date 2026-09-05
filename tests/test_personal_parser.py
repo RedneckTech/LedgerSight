@@ -202,5 +202,121 @@ class TestParsePersonalStatementDispatch(unittest.TestCase):
         self.assertEqual(stmt.account_type, "Credit Card")
 
 
+def wrapped_statement_text() -> str:
+    """Real First Interstate layout: a two-line description prints its first
+    line ABOVE the dated row and its second line BELOW it; one-line
+    descriptions sit on the dated row. Mirrors the June 2026 statements."""
+    header = f"{'Post Date  Description':<60}{'Debits':<18}{'Credits':<18}{'Balance'}"
+    pad = " " * 13
+    lines = [
+        "JACOB PFEIFF",
+        "XXXXXXXXXXX6781\tBASIC CHECKING",
+        "Statement Ending 06/26/2026",
+        "Account Summary",
+        "05/27/2026 Beginning Balance $283.94",
+        "2 Credit     This Period   $370.00",
+        "4 Debit      This Period   $157.50",
+        "Ending Balance $496.44",
+        "",
+        "Account Activity",
+        header,
+        activity_row("06/03/2026", "MISCELLANEOUS DEBIT", "$110.00", False, "$173.94"),
+        f"{pad}XX0844 DEBIT CARD 06/02 08:35 Audible L746J95Q",
+        activity_row("06/03/2026", "", "$14.67", False, "$159.27"),
+        f"{pad}NEWARK NJ 41860326 812703",
+        f"{pad}XX0844 DEBIT CARD 06/22 21:31 OPENAI CHATGPT SAN",
+        activity_row("06/23/2026", "", "$21.40", False, "$137.87"),
+        f"{pad}FRANCISCO CA 07122175 826535",
+        activity_row("06/24/2026", "DEPOSIT", "$10.00", True, "$147.87"),
+        f"{pad}649104 WEB XFER FROM REGULAR SAVINGS",
+        activity_row("06/24/2026", "", "$360.00", True, "$507.87"),
+        f"{pad}XXXXXX3608 6/24/26",
+        "",
+        "       45D13DB3BB49974181EE10A316F35A62                 20260626          Checking Account Statements",
+        "JACOB PFEIFF                                 XXXXXXXXXXX6781           Statement Ending 06/26/2026",
+        "BASIC CHECKING - XXXXXXXXXXX6781 (continued)",
+        "Account Activity (continued)",
+        header,
+        f"{pad}125 S Roosevelt Ave BURLINGTON IA 12667016 200547",
+        activity_row("06/25/2026", "", "$11.43", False, "$496.44"),
+        f"{pad}XX0844 DEBIT CARD 06/24 10:32",
+        "06/26/2026 Ending Balance $496.44",
+        "Checks Cleared",
+        "Daily Balances",
+        "06/03/2026 $159.27   06/23/2026 $137.87",
+    ]
+    return "\n".join(lines)
+
+
+class TestWrappedDescriptions(unittest.TestCase):
+    def setUp(self) -> None:
+        self.stmt = parse_statement(wrapped_statement_text())
+        self.by_amount = {str(t.amount): t for t in self.stmt.transactions}
+
+    def test_row_count(self) -> None:
+        self.assertEqual(len(self.stmt.transactions), 6)
+
+    def test_placeholder_row_keeps_only_its_own_text(self) -> None:
+        self.assertEqual(self.by_amount["110.00"].description, "MISCELLANEOUS DEBIT")
+
+    def test_two_line_descriptions_are_reassembled(self) -> None:
+        self.assertEqual(
+            self.by_amount["14.67"].description,
+            "XX0844 DEBIT CARD 06/02 08:35 Audible L746J95Q NEWARK NJ 41860326 812703",
+        )
+        self.assertEqual(
+            self.by_amount["21.40"].description,
+            "XX0844 DEBIT CARD 06/22 21:31 OPENAI CHATGPT SAN FRANCISCO CA 07122175 826535",
+        )
+
+    def test_inline_description_not_polluted_by_neighbours(self) -> None:
+        self.assertEqual(self.by_amount["10.00"].description, "DEPOSIT")
+        self.assertEqual(
+            self.by_amount["360.00"].description,
+            "649104 WEB XFER FROM REGULAR SAVINGS XXXXXX3608 6/24/26",
+        )
+
+    def test_continued_page_record(self) -> None:
+        self.assertEqual(
+            self.by_amount["11.43"].description,
+            "125 S Roosevelt Ave BURLINGTON IA 12667016 200547 XX0844 DEBIT CARD 06/24 10:32",
+        )
+
+    def test_daily_balances_not_parsed_as_activity(self) -> None:
+        self.assertTrue(
+            all(t.post_date != "06/23/2026" or t.amount == Decimal("21.40") for t in self.stmt.transactions)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCardTerms(unittest.TestCase):
+    def test_reads_due_date_minimum_limit_and_apr(self) -> None:
+        text = sample_card_statement_text() + "\n".join(
+            [
+                "",
+                "  Payment Due Date                                  For online and phone payments",
+                "  Feb 22, 2026",
+                "  New Balance                                       Minimum Payment Due",
+                "",
+                "  $1,133.97                                         $25.00",
+                "                                                    Credit Limit                 $1,300.00",
+                "Payment Due Date: Feb 22, 2026                                      Account ending in 0142",
+                "Type of Balance                     Annual Percentage Rate (APR)",
+                "Purchases                                     30.49% P            $1,134.36",
+            ]
+        )
+        stmt = parse_personal_statement(text)
+        self.assertEqual(stmt.payment_due_date, "02/22/2026")
+        self.assertEqual(stmt.minimum_payment, Decimal("25.00"))
+        self.assertEqual(stmt.credit_limit, Decimal("1300.00"))
+        self.assertEqual(stmt.apr_purchases, Decimal("30.49"))
+
+    def test_source_page_and_row_are_tracked(self) -> None:
+        stmt = parse_statement(wrapped_statement_text())
+        by_amount = {str(t.amount): t for t in stmt.transactions}
+        self.assertEqual(by_amount["110.00"].source_row, 1)
+        self.assertEqual(by_amount["110.00"].source_page, 1)
+        self.assertEqual(by_amount["11.43"].source_row, 6)
