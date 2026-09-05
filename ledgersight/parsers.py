@@ -1,4 +1,5 @@
 """PDF bank statement parsing utilities."""
+
 from __future__ import annotations
 
 import hashlib
@@ -71,7 +72,8 @@ def find_pdfs(directory: Path) -> list[Path]:
     """Find all PDF files in a directory, excluding the generated report."""
     pdfs = []
     exclude_patterns = [
-        "personal_financial_report", "business_financial_report",
+        "personal_financial_report",
+        "business_financial_report",
     ]
     for p in sorted(directory.iterdir()):
         if not p.suffix.lower() == ".pdf":
@@ -95,7 +97,7 @@ def _parse_daily_date(date_str: str) -> date | None:
     try:
         parts = date_str.split("/")
         return date(int(parts[2]), int(parts[0]), int(parts[1]))
-    except (ValueError, IndexError):
+    except ValueError, IndexError:
         return None
 
 
@@ -114,14 +116,10 @@ def check_pdftotext() -> None:
             "  macOS: brew install poppler\n"
             "  Windows: https://github.com/oschwartz10612/poppler-windows/releases"
         )
-        raise LedgerSightError(
-            "pdftotext not found. Install poppler-utils."
-        ) from None
+        raise LedgerSightError("pdftotext not found. Install poppler-utils.") from None
     except Exception as exc:
         logger.error(f"Cannot run pdftotext: {exc}")
-        raise LedgerSightError(
-            f"Cannot run pdftotext: {exc}"
-        ) from exc
+        raise LedgerSightError(f"Cannot run pdftotext: {exc}") from exc
 
 
 def extract_text(pdf_path: Path) -> str:
@@ -307,7 +305,7 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
 
             amounts = list(MONEY_RE.finditer(line))
             if not amounts:
-                desc_part = line[date_match.end():].strip()
+                desc_part = line[date_match.end() :].strip()
                 if desc_part:
                     desc_buffer.append(desc_part)
                 continue
@@ -328,7 +326,7 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
                         # treat as a balance-only line, skip.
                         continue
                 # Fallback: treat as a description-line continuation.
-                desc_part = line[date_match.end():amounts[0].start()].strip()
+                desc_part = line[date_match.end() : amounts[0].start()].strip()
                 if desc_part:
                     desc_buffer.append(desc_part)
                 continue
@@ -339,8 +337,7 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
             # Running-balance arithmetic is the most reliable indicator.
             # Column-position heuristics are the fallback.
             is_credit = False
-            prev_bal = (transactions[-1].balance if transactions
-                        else beginning_balance)
+            prev_bal = transactions[-1].balance if transactions else beginning_balance
 
             credited = abs((prev_bal + tx_amount) - balance) <= RC_TOLERANCE
             debited = abs((prev_bal - tx_amount) - balance) <= RC_TOLERANCE
@@ -376,7 +373,7 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
                         is_credit = balance > beginning_balance
 
             desc_parts = list(desc_buffer)
-            current_desc = line[date_match.end():amounts[-2].start()].strip()
+            current_desc = line[date_match.end() : amounts[-2].start()].strip()
             has_own_desc = bool(current_desc)
 
             if has_own_desc:
@@ -384,9 +381,7 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
                     stray_text = " ".join(desc_parts).strip()
                     if stray_text:
                         tx = transactions[-1]
-                        tx.description = _clean_description(
-                            f"{tx.description} {stray_text}"
-                        )
+                        tx.description = _clean_description(f"{tx.description} {stray_text}")
                         tx.original_description = tx.description
                 desc_buffer.clear()
                 description = _clean_description(current_desc)
@@ -398,16 +393,18 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
                 desc_buffer.clear()
 
             tx_seq += 1
-            transactions.append(Transaction(
-                post_date=post_date,
-                description=description,
-                original_description=description,
-                amount=tx_amount,
-                is_credit=is_credit,
-                balance=balance,
-                source_statement=file_path,
-                sequence=tx_seq,
-            ))
+            transactions.append(
+                Transaction(
+                    post_date=post_date,
+                    description=description,
+                    original_description=description,
+                    amount=tx_amount,
+                    is_credit=is_credit,
+                    balance=balance,
+                    source_statement=file_path,
+                    sequence=tx_seq,
+                )
+            )
 
             # After parsing the transaction line, check whether this
             # line ALSO contains a section-ending heading that tells us
@@ -422,9 +419,7 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
                 extra = _clean_description(" ".join(desc_buffer))
                 if extra:
                     tx = transactions[-1]
-                    tx.description = _clean_description(
-                        f"{tx.description} {extra}"
-                    )
+                    tx.description = _clean_description(f"{tx.description} {extra}")
                     tx.original_description = tx.description
                 desc_buffer.clear()
             break
@@ -447,11 +442,13 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
             break
         m = re.match(r"\s*(\d+)\s+(\d{2}/\d{2}/\d{4})\s+\$([\d,]+\.\d{2})", line)
         if m:
-            checks.append({
-                "number": int(m.group(1)),
-                "date": m.group(2),
-                "amount": parse_amount("$" + m.group(3)),
-            })
+            checks.append(
+                {
+                    "number": int(m.group(1)),
+                    "date": m.group(2),
+                    "amount": parse_amount("$" + m.group(3)),
+                }
+            )
 
     # Daily Balances
     daily_balances: list[dict] = []
@@ -467,10 +464,12 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
             break
         pairs = re.findall(r"(\d{2}/\d{2}/\d{4})\s+(-?\$[\d,]+\.\d{2})", line)
         for date_str, amt_str in pairs:
-            daily_balances.append({
-                "date": date_str,
-                "balance": parse_amount(amt_str),
-            })
+            daily_balances.append(
+                {
+                    "date": date_str,
+                    "balance": parse_amount(amt_str),
+                }
+            )
 
     return Statement(
         statement_date=statement_date,
@@ -507,7 +506,7 @@ def validate_statement(stmt: Statement) -> StatementValidation:
                 result.errors.append(f"Unparseable statement date: {stmt.statement_date}")
             else:
                 stmt.date_obj
-        except (ValueError, IndexError):
+        except ValueError, IndexError:
             result.errors.append(f"Invalid statement date: {stmt.statement_date}")
 
     if not stmt.account_number:
@@ -521,7 +520,7 @@ def validate_statement(stmt: Statement) -> StatementValidation:
     for tx in stmt.transactions:
         try:
             tx.date_obj
-        except (ValueError, IndexError):
+        except ValueError, IndexError:
             result.errors.append(f"Invalid transaction date: {tx.post_date}")
             break
 

@@ -1,4 +1,5 @@
 """Transaction categorization engine."""
+
 from __future__ import annotations
 
 import logging
@@ -10,13 +11,15 @@ logger = logging.getLogger("ledgersight.categorizer")
 
 _INCOME_CATEGORIES: dict[str, list[str]] = {
     "Sales Revenue": [
-        r"\bINVOICE\b", r"\bSALE\b.*\bREVENUE\b",
+        r"\bINVOICE\b",
+        r"\bSALE\b.*\bREVENUE\b",
     ],
     "Service Revenue": [
         r"\bSERVICE\s+REVENUE\b",
     ],
     "Freight Revenue": [
-        r"\bFREIGHT\b", r"\bTRUCKING\s+REVENUE\b",
+        r"\bFREIGHT\b",
+        r"\bTRUCKING\s+REVENUE\b",
         r"Incoming\s+Wire\s+.*APEX\s+CAPITAL\s+CORP",
     ],
     "Contract Revenue": [
@@ -29,7 +32,9 @@ _INCOME_CATEGORIES: dict[str, list[str]] = {
         r"\bINTEREST\s+(?:PAID|EARNED|INCOME)\b",
     ],
     "Refunds and Reimbursements": [
-        r"\bREFUND\b", r"\bREIMBURSEMENT\b", r"\bREBATE\b",
+        r"\bREFUND\b",
+        r"\bREIMBURSEMENT\b",
+        r"\bREBATE\b",
     ],
     "Other Income": [
         r"\bOTHER\s+INCOME\b",
@@ -38,52 +43,76 @@ _INCOME_CATEGORIES: dict[str, list[str]] = {
 
 _EXPENSE_CATEGORIES: dict[str, list[str]] = {
     "Fuel": [
-        r"\bPILOT\b", r"FLYING\s*J", r"LOVE'?S",
-        r"KWIK\s*STAR", r"\bCASEYS?\b",
-        r"\bMARATHON\b", r"\bYESWAY\b", r"CIRCLE\s*K",
-        r"\bTRAVEL\s+CNT\b", r"\bTRAVEL\s+CENTER\b",
+        r"\bPILOT\b",
+        r"FLYING\s*J",
+        r"LOVE'?S",
+        r"KWIK\s*STAR",
+        r"\bCASEYS?\b",
+        r"\bMARATHON\b",
+        r"\bYESWAY\b",
+        r"CIRCLE\s*K",
+        r"\bTRAVEL\s+CNT\b",
+        r"\bTRAVEL\s+CENTER\b",
         r"\bTA\b\s+(?:#\d+\s+)?[A-Z]{3,}",
-        r"\bBP#\d", r"\bBB\s+OF\s+HOUSTON\b",
-        r"\bBREAK\s+TIME\b", r"\bSHELL\b.*SERVICE",
-        r"\b59\s+FASTLANE\b", r"\bCTLP\b",
-        r"\bWOODSHED\b", r"\bPORT\s+AUTO\s+TRUCK\b",
-        r"\bTEX\s+BEST\b", r"\bTBS\b.*DENISON",
-        r"\bDIESEL\b", r"\bGAS\b.*\bSTATION\b",
+        r"\bBP#\d",
+        r"\bBB\s+OF\s+HOUSTON\b",
+        r"\bBREAK\s+TIME\b",
+        r"\bSHELL\b.*SERVICE",
+        r"\b59\s+FASTLANE\b",
+        r"\bCTLP\b",
+        r"\bWOODSHED\b",
+        r"\bPORT\s+AUTO\s+TRUCK\b",
+        r"\bTEX\s+BEST\b",
+        r"\bTBS\b.*DENISON",
+        r"\bDIESEL\b",
+        r"\bGAS\b.*\bSTATION\b",
     ],
     "Freight and Shipping": [
         r"\bFREIGHT\s+(?:CHARGE|FEE|COST)\b",
         r"\bSHIPPING\b",
     ],
     "Subcontractors": [
-        r"\bSUBCONTRACTOR\b", r"\bSUBCONTRACT\b",
+        r"\bSUBCONTRACTOR\b",
+        r"\bSUBCONTRACT\b",
     ],
     "Direct Labor": [
         r"\bDIRECT\s+LABOR\b",
     ],
     "Materials and Supplies": [
-        r"\bMATERIALS\b", r"\bSUPPLIES\b",
+        r"\bMATERIALS\b",
+        r"\bSUPPLIES\b",
     ],
     "Equipment Rental": [
-        r"\bEQUIPMENT\s+RENTAL\b", r"\bTRAILER\s+RENTAL\b",
+        r"\bEQUIPMENT\s+RENTAL\b",
+        r"\bTRAILER\s+RENTAL\b",
         r"\bRENTAL\s+EQUIPMENT\b",
     ],
     "Tolls and Scale Fees": [
-        r"\bTOLL\b", r"\bSCALE\s+FEE\b", r"\bWEIGH\s+STATION\b",
+        r"\bTOLL\b",
+        r"\bSCALE\s+FEE\b",
+        r"\bWEIGH\s+STATION\b",
     ],
     "Other Direct Costs": [],
     "Advertising and Marketing": [
-        r"\bADVERTISING\b", r"\bMARKETING\b", r"\bDAT\s+SOLUTIONS\b",
-        r"\bLOAD\s*BOARD\b", r"\b123LOADBOARD\b",
+        r"\bADVERTISING\b",
+        r"\bMARKETING\b",
+        r"\bDAT\s+SOLUTIONS\b",
+        r"\bLOAD\s*BOARD\b",
+        r"\b123LOADBOARD\b",
     ],
     "Bank and Merchant Fees": [
-        r"MasterCard Cross Border", r"SALES\s+TAX\b", r"Overdraft",
-        r"FEE\s+FOR\s+DDA", r"DDA\s+WITHDRAWAL",
+        r"MasterCard Cross Border",
+        r"SALES\s+TAX\b",
+        r"Overdraft",
+        r"FEE\s+FOR\s+DDA",
+        r"DDA\s+WITHDRAWAL",
         r"Incoming Wire Transfer Fee",
         r"\bWIRE\s+TRANSFER\s+FEE\b",
         r"^SERVICE\s+CHARGE$",
     ],
     "Business Insurance": [
-        r"\bPROGRESSIVE\s+INS\b", r"\bINSURANCE\b",
+        r"\bPROGRESSIVE\s+INS\b",
+        r"\bINSURANCE\b",
     ],
     "Commissions": [
         r"\bCOMMISSION\b",
@@ -93,88 +122,130 @@ _EXPENSE_CATEGORIES: dict[str, list[str]] = {
     ],
     "Depreciation Placeholder": [],
     "Dues and Subscriptions": [
-        r"\bDUES\b", r"\bMEMBERSHIP\b",
+        r"\bDUES\b",
+        r"\bMEMBERSHIP\b",
     ],
     "Employee Benefits": [
         r"\bBENEFITS\b",
     ],
     "Equipment Maintenance": [
         r"\bPARTS\b",
-        r"\bREPAIR\s+SHOP", r"\bTRUCK\s+REPAIR",
-        r"\bMAINTENANCE\s+SHOP", r"\bTIRE\s+SERVICE",
-        r"O'REILLY\s+AUTO", r"\bAUTO\s+ZONE\b",
+        r"\bREPAIR\s+SHOP",
+        r"\bTRUCK\s+REPAIR",
+        r"\bMAINTENANCE\s+SHOP",
+        r"\bTIRE\s+SERVICE",
+        r"O'REILLY\s+AUTO",
+        r"\bAUTO\s+ZONE\b",
     ],
     "Legal and Professional Fees": [
-        r"\bLEGAL\b", r"\bATTORNEY\b", r"\bLAW\s+OFFICE\b",
+        r"\bLEGAL\b",
+        r"\bATTORNEY\b",
+        r"\bLAW\s+OFFICE\b",
         r"\bLEGALSHIELD\b",
     ],
     "Licenses and Permits": [
-        r"\bLICENSE\b", r"\bPERMIT\b", r"\bREGISTRATION\b",
+        r"\bLICENSE\b",
+        r"\bPERMIT\b",
+        r"\bREGISTRATION\b",
     ],
     "Meals": [
-        r"SONIC\s+DRIVE", r"\bARBYS?\b", r"MCDONALD",
-        r"\bARANDAS\b", r"DOORDASH", r"\bWENDYS?\b",
-        r"BURGER\s+KING", r"TACO\s+JOHN",
-        r"PANCHEROS[\s-]*MEXICA", r"CARL'?S\s*JR",
-        r"\bDENNY'?S?\b", r"\bHARDEE'?S\b",
-        r"DAIRY\s+QUEEN", r"\bHAYMAKERS?\b",
-        r"STILL\s+SMOKIN", r"HONG\s+KONG\s+BUFFET",
+        r"SONIC\s+DRIVE",
+        r"\bARBYS?\b",
+        r"MCDONALD",
+        r"\bARANDAS\b",
+        r"DOORDASH",
+        r"\bWENDYS?\b",
+        r"BURGER\s+KING",
+        r"TACO\s+JOHN",
+        r"PANCHEROS[\s-]*MEXICA",
+        r"CARL'?S\s*JR",
+        r"\bDENNY'?S?\b",
+        r"\bHARDEE'?S\b",
+        r"DAIRY\s+QUEEN",
+        r"\bHAYMAKERS?\b",
+        r"STILL\s+SMOKIN",
+        r"HONG\s+KONG\s+BUFFET",
         r"\bRESTAURANT\b",
     ],
     "Office Expense": [
-        r"\bOFFICE\b", r"\bSTAPLES\b", r"\bOFFICE\s+DEPOT\b",
+        r"\bOFFICE\b",
+        r"\bSTAPLES\b",
+        r"\bOFFICE\s+DEPOT\b",
     ],
     "Payroll": [
-        r"\bPAYROLL\b", r"\bSALARY\b", r"\bWAGES\b",
+        r"\bPAYROLL\b",
+        r"\bSALARY\b",
+        r"\bWAGES\b",
     ],
     "Payroll Taxes": [
         r"\bPAYROLL\s+TAX\b",
     ],
     "Rent or Lease": [
-        r"\bOFFICE\s+RENT\b", r"\bPROPERTY\s+LEASE\b",
+        r"\bOFFICE\s+RENT\b",
+        r"\bPROPERTY\s+LEASE\b",
         r"\bRENT\s+PAYMENT\b",
     ],
     "Repairs and Maintenance": [
-        r"\bREPAIR\b", r"\bMAINTENANCE\b",
+        r"\bREPAIR\b",
+        r"\bMAINTENANCE\b",
         r"\bGENERAL\s+REPAIR\b",
     ],
     "Software and Cloud Services": [
-        r"GOOGLE\s+LLC\s+GSUIT", r"\bGSUITE\b",
-        r"\bMICROSOFT\s*365\b", r"\bDROPBOX\b",
-        r"\bSOFTWARE\b", r"\bCLOUD\b",
+        r"GOOGLE\s+LLC\s+GSUIT",
+        r"\bGSUITE\b",
+        r"\bMICROSOFT\s*365\b",
+        r"\bDROPBOX\b",
+        r"\bSOFTWARE\b",
+        r"\bCLOUD\b",
     ],
     "Taxes and Fees": [
-        r"\bTAX\b", r"\bFEE\b",
+        r"\bTAX\b",
+        r"\bFEE\b",
     ],
     "Telephone and Internet": [
-        r"\bSTRAIGHT\s*TALK\b", r"\bVERIZON\b",
-        r"\bAT&T\b", r"\bT-MOBILE\b",
-        r"\bINTERNET\b", r"\bPHONE\b",
+        r"\bSTRAIGHT\s*TALK\b",
+        r"\bVERIZON\b",
+        r"\bAT&T\b",
+        r"\bT-MOBILE\b",
+        r"\bINTERNET\b",
+        r"\bPHONE\b",
     ],
     "Travel": [
-        r"\bTRAVEL\b", r"\bHOTEL\b", r"\bMOTEL\b",
-        r"\bAIRLINE\b", r"\bFLIGHT\b",
+        r"\bTRAVEL\b",
+        r"\bHOTEL\b",
+        r"\bMOTEL\b",
+        r"\bAIRLINE\b",
+        r"\bFLIGHT\b",
     ],
     "Utilities": [
-        r"\bALLIANT\s+ENERGY\b", r"\bUTILITY\b",
-        r"\bELECTRIC\b", r"\bWATER\b", r"\bGAS\s+COMPANY\b",
+        r"\bALLIANT\s+ENERGY\b",
+        r"\bUTILITY\b",
+        r"\bELECTRIC\b",
+        r"\bWATER\b",
+        r"\bGAS\s+COMPANY\b",
     ],
     "Vehicle Expense": [
-        r"TRUCK\s*PARKING", r"\bCAR\s*WASH\b",
-        r"\bTIRE\b", r"\bOIL\s+CHANGE\b",
+        r"TRUCK\s*PARKING",
+        r"\bCAR\s*WASH\b",
+        r"\bTIRE\b",
+        r"\bOIL\s+CHANGE\b",
     ],
 }
 
 _NON_PNL_CATEGORIES: dict[str, list[str]] = {
     "Account Transfer": [
-        r"WEB\s+XFER", r"ZELLE", r"PAYPAL\s+INST\s+XFER",
+        r"WEB\s+XFER",
+        r"ZELLE",
+        r"PAYPAL\s+INST\s+XFER",
     ],
     "Credit Card Payment": [
-        r"\bCAPITAL\s+ONE\b", r"\bCHIME\b",
+        r"\bCAPITAL\s+ONE\b",
+        r"\bCHIME\b",
         r"\bCREDIT\s+CARD\s+PAYMENT\b",
     ],
     "Loan Proceeds": [
-        r"\bLOAN\s+PROCEEDS?\b", r"\bLOAN\s+DISBURSEMENT\b",
+        r"\bLOAN\s+PROCEEDS?\b",
+        r"\bLOAN\s+DISBURSEMENT\b",
     ],
     "Payment Reversal": [
         r"RETURNED\s+ITEM.*INSUFFICIENT\s+FUNDS",
@@ -187,13 +258,16 @@ _NON_PNL_CATEGORIES: dict[str, list[str]] = {
         r"\bOWNER\s+CONTRIBUTION\b",
     ],
     "Owner Draw or Distribution": [
-        r"\bOWNER\s+DRAW\b", r"\bDISTRIBUTION\b",
+        r"\bOWNER\s+DRAW\b",
+        r"\bDISTRIBUTION\b",
     ],
     "Fixed Asset Purchase": [
-        r"\bTRUCK\s+PURCHASE\b", r"\bEQUIPMENT\s+PURCHASE\b",
+        r"\bTRUCK\s+PURCHASE\b",
+        r"\bEQUIPMENT\s+PURCHASE\b",
     ],
     "Tax Payment": [
-        r"\bTAX\s+PAYMENT\b", r"IOWA\s+JUDICIAL\b",
+        r"\bTAX\s+PAYMENT\b",
+        r"IOWA\s+JUDICIAL\b",
     ],
     "Refund": [
         r"\bREFUND\b",
@@ -268,29 +342,33 @@ def build_default_rules() -> list[CategoryRule]:
     for cat, patterns in _EXPENSE_CATEGORIES.items():
         for pat in patterns:
             priority_counter += 1
-            rules.append(CategoryRule(
-                pattern=pat,
-                category=cat,
-                tax_category=_get_default_tax_category(cat),
-                deductibility="likely-deductible" if cat != "Meals" else "possibly-deductible",
-                include_in_pnl=True,
-                direction="debit",
-                priority=priority_counter,
-            ))
+            rules.append(
+                CategoryRule(
+                    pattern=pat,
+                    category=cat,
+                    tax_category=_get_default_tax_category(cat),
+                    deductibility="likely-deductible" if cat != "Meals" else "possibly-deductible",
+                    include_in_pnl=True,
+                    direction="debit",
+                    priority=priority_counter,
+                )
+            )
 
     for cat, patterns in _INCOME_CATEGORIES.items():
         for pat in patterns:
             priority_counter += 1
-            rules.append(CategoryRule(
-                pattern=pat,
-                category=cat,
-                tax_category="Gross Receipts",
-                deductibility="not-applicable",
-                is_income=True,
-                include_in_pnl=True,
-                direction="credit",
-                priority=priority_counter,
-            ))
+            rules.append(
+                CategoryRule(
+                    pattern=pat,
+                    category=cat,
+                    tax_category="Gross Receipts",
+                    deductibility="not-applicable",
+                    is_income=True,
+                    include_in_pnl=True,
+                    direction="credit",
+                    priority=priority_counter,
+                )
+            )
 
     return rules
 
@@ -336,8 +414,7 @@ def _get_default_tax_category(business_cat: str) -> str:
 class TransactionCategorizer:
     """Categorizes transactions using ordered category rules."""
 
-    def __init__(self, custom_rules: list[CategoryRule] | None = None,
-                 merchant_aliases: dict[str, str] | None = None):
+    def __init__(self, custom_rules: list[CategoryRule] | None = None, merchant_aliases: dict[str, str] | None = None):
         self.default_rules = build_default_rules()
         self.custom_rules = custom_rules or []
         self.merchant_aliases = merchant_aliases or {}
@@ -382,20 +459,24 @@ class TransactionCategorizer:
                     transaction.is_owner_related = rule.is_owner_related
                     transaction.is_fixed_asset = rule.is_fixed_asset
                     transaction.is_loan = rule.is_loan
-                    if rule.category not in (
-                        "Uncategorized", "CPA Review Required",
-                    ) and rule.tax_category != "non-pl":
+                    if (
+                        rule.category
+                        not in (
+                            "Uncategorized",
+                            "CPA Review Required",
+                        )
+                        and rule.tax_category != "non-pl"
+                    ):
                         transaction.cpa_review = False
                     else:
                         transaction.cpa_review = True
-                        transaction.review_reason = (
-                            f"Matched '{rule.category}' rule — requires CPA verification"
-                        )
+                        transaction.review_reason = f"Matched '{rule.category}' rule — requires CPA verification"
                     return transaction
             except re.error as exc:
                 logger.warning(
                     "Invalid regex pattern skipped: %s — %s",
-                    rule.pattern, exc,
+                    rule.pattern,
+                    exc,
                 )
                 continue
 

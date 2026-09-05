@@ -14,10 +14,20 @@ class TestKPIs(unittest.TestCase):
                 beginning_balance="1000.00",
                 ending_balance="1200.00",
                 transactions=[
-                    make_tx(description="REV", amount="500.00", is_credit=True,
-                            business_category="Service Revenue", include_in_pnl=True),
-                    make_tx(description="EXP", amount="300.00", is_credit=False,
-                            business_category="Fuel", include_in_pnl=True),
+                    make_tx(
+                        description="REV",
+                        amount="500.00",
+                        is_credit=True,
+                        business_category="Service Revenue",
+                        include_in_pnl=True,
+                    ),
+                    make_tx(
+                        description="EXP",
+                        amount="300.00",
+                        is_credit=False,
+                        business_category="Fuel",
+                        include_in_pnl=True,
+                    ),
                 ],
             ),
         ]

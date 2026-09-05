@@ -1,4 +1,5 @@
 """Matplotlib chart generators for financial reports."""
+
 from __future__ import annotations
 
 import io
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING
 import matplotlib
 
 matplotlib.use("Agg")
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
@@ -18,7 +20,16 @@ from ledgersight.models import Statement
 from ledgersight.redaction import DataRedactor
 
 if TYPE_CHECKING:
-    from business_financial_report import ProfitAndLoss, ProjectionResult
+    from matplotlib.colors import Colormap
+
+    from ledgersight.business.pl import ProfitAndLoss
+    from ledgersight.business.projections import ProjectionResult
+
+
+def _colormap_colors(cmap: Colormap, n: int) -> list[tuple[float, float, float, float]]:
+    """Sample n evenly spaced RGBA colors from a colormap."""
+    values = [i / max(n, 1) for i in range(n)]
+    return [(float(r), float(g), float(b), float(a)) for r, g, b, a in cmap(values)]
 
 
 def _empty_chart_buf(msg: str = "No data available") -> io.BytesIO:
@@ -97,9 +108,7 @@ def chart_net_cash_flow(statements: list[Statement]) -> io.BytesIO:
     if not statements:
         return _empty_chart_buf("No statement data for chart")
     months = [s.month_label for s in statements]
-    flows = [
-        float(s.total_credits - s.total_debits) for s in statements
-    ]
+    flows = [float(s.total_credits - s.total_debits) for s in statements]
 
     fig, ax = plt.subplots(figsize=(12, 7))
     x = range(len(months))
@@ -136,9 +145,11 @@ def chart_balance_trend(statements: list[Statement]) -> io.BytesIO:
     dates = [b[0] for b in all_bals]
     vals = [b[1] for b in all_bals]
 
+    date_nums = mdates.date2num(dates)
     fig, ax = plt.subplots(figsize=(12, 7))
-    ax.plot(dates, vals, color="#2c3e50", linewidth=1.4, alpha=0.85)
-    ax.fill_between(dates, 0, vals, alpha=0.08, color="#2c3e50")
+    ax.plot(date_nums, vals, color="#2c3e50", linewidth=1.4, alpha=0.85)
+    ax.fill_between(date_nums, 0, vals, alpha=0.08, color="#2c3e50")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
     ax.axhline(y=0, color="#e74c3c", linewidth=0.5, linestyle="--", alpha=0.5)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
     ax.set_title("Bank Balance Trend", fontsize=11, fontweight="bold")
@@ -178,17 +189,19 @@ def chart_expenses_by_category(pl: ProfitAndLoss) -> io.BytesIO:
             labels.append("Other")
             sizes.append(other)
 
-    colors = plt.cm.tab20([i / len(labels) for i in range(len(labels))])
+    colors = _colormap_colors(plt.cm.tab20, len(labels))
     fig, ax = plt.subplots(figsize=(7, 5))
     wedges, texts, autotexts = ax.pie(
-        sizes, labels=None, autopct="%1.1f%%",
-        startangle=140, colors=colors,
+        sizes,
+        labels=None,
+        autopct="%1.1f%%",
+        startangle=140,
+        colors=colors,
     )
     for t in autotexts:
         t.set_fontsize(7)
     legend_labels = [f"{lb} (${sz:,.0f})" for lb, sz in zip(labels, sizes)]
-    ax.legend(wedges, legend_labels, title="Expenses", loc="center left",
-              bbox_to_anchor=(1, 0.5), fontsize=7)
+    ax.legend(wedges, legend_labels, title="Expenses", loc="center left", bbox_to_anchor=(1, 0.5), fontsize=7)
     ax.set_title("Expenses by Category", fontsize=11, fontweight="bold")
     fig.tight_layout()
     buf = io.BytesIO()
@@ -211,17 +224,19 @@ def chart_revenue_by_category(pl: ProfitAndLoss) -> io.BytesIO:
     labels = [k for k, _ in sorted_items[:8]]
     sizes = [v for _, v in sorted_items[:8]]
 
-    colors = plt.cm.Set2([i / max(len(labels), 1) for i in range(len(labels))])
+    colors = _colormap_colors(plt.cm.Set2, len(labels))
     fig, ax = plt.subplots(figsize=(6, 5))
     wedges, _, autotexts = ax.pie(
-        sizes, labels=None, autopct="%1.1f%%",
-        startangle=140, colors=colors,
+        sizes,
+        labels=None,
+        autopct="%1.1f%%",
+        startangle=140,
+        colors=colors,
     )
     for t in autotexts:
         t.set_fontsize(7)
     legend_labels = [f"{lb} (${sz:,.0f})" for lb, sz in zip(labels, sizes)]
-    ax.legend(wedges, legend_labels, title="Revenue", loc="center left",
-              bbox_to_anchor=(1, 0.5), fontsize=7)
+    ax.legend(wedges, legend_labels, title="Revenue", loc="center left", bbox_to_anchor=(1, 0.5), fontsize=7)
     ax.set_title("Revenue by Category", fontsize=11, fontweight="bold")
     fig.tight_layout()
     buf = io.BytesIO()
@@ -272,8 +287,7 @@ def chart_projection(
     fig, ax = plt.subplots(figsize=(12, 7))
     x_hist = range(len(historical_rev))
     if historical_rev:
-        ax.bar(x_hist, [float(r) for r in historical_rev],
-               label="Actual Revenue", color="#27ae60", alpha=0.7)
+        ax.bar(x_hist, [float(r) for r in historical_rev], label="Actual Revenue", color="#27ae60", alpha=0.7)
 
     offset = len(historical_rev)
     colors = {"conservative": "#e74c3c", "base": "#2980b9", "growth": "#8e44ad"}
@@ -283,15 +297,19 @@ def chart_projection(
         x_proj = range(offset, offset + pr.months)
         clr = colors.get(pr.scenario, "#888888")
         ls = linestyles.get(pr.scenario, "-")
-        ax.plot(x_proj, [float(r) for r in pr.monthly_revenue],
-                color=clr, linestyle=ls, linewidth=2,
-                label=f"{pr.scenario.title()} Projection")
+        ax.plot(
+            x_proj,
+            [float(r) for r in pr.monthly_revenue],
+            color=clr,
+            linestyle=ls,
+            linewidth=2,
+            label=f"{pr.scenario.title()} Projection",
+        )
 
     # Divide line
     if historical_rev and projections:
         ax.axvline(x=offset - 0.5, color="#888", linestyle=":", linewidth=1)
-        ax.text(offset - 0.5, ax.get_ylim()[1] * 0.95, "Projection ->",
-                ha="right", fontsize=8, color="#888")
+        ax.text(offset - 0.5, ax.get_ylim()[1] * 0.95, "Projection ->", ha="right", fontsize=8, color="#888")
 
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
     ax.set_title("Revenue: Actual vs Projected", fontsize=11, fontweight="bold")

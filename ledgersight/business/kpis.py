@@ -1,4 +1,5 @@
 """Key Performance Indicators calculation."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

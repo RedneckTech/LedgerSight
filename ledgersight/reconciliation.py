@@ -1,4 +1,5 @@
 """Bank statement reconciliation."""
+
 from __future__ import annotations
 
 import logging
@@ -26,14 +27,8 @@ def reconcile_statement(stmt: Statement, tolerance: Decimal = RC_TOLERANCE) -> R
     calculated_ending = stmt.beginning_balance + parsed_credits - parsed_debits
     balance_ok = abs(calculated_ending - stmt.ending_balance) <= tolerance
 
-    credits_ok = (
-        abs(parsed_credits - stmt.total_credits) <= tolerance
-        and parsed_credit_count == stmt.credit_count
-    )
-    debits_ok = (
-        abs(parsed_debits - stmt.total_debits) <= tolerance
-        and parsed_debit_count == stmt.debit_count
-    )
+    credits_ok = abs(parsed_credits - stmt.total_credits) <= tolerance and parsed_credit_count == stmt.credit_count
+    debits_ok = abs(parsed_debits - stmt.total_debits) <= tolerance and parsed_debit_count == stmt.debit_count
 
     warnings: list[str] = []
     if not credits_ok:
@@ -47,9 +42,7 @@ def reconcile_statement(stmt: Statement, tolerance: Decimal = RC_TOLERANCE) -> R
             f"expected {stmt.debit_count}/{stmt.total_debits}"
         )
     if not balance_ok:
-        warnings.append(
-            f"Balance mismatch: calculated={calculated_ending} vs ending={stmt.ending_balance}"
-        )
+        warnings.append(f"Balance mismatch: calculated={calculated_ending} vs ending={stmt.ending_balance}")
 
     return ReconciliationResult(
         statement_label=stmt.month_label,
@@ -91,7 +84,8 @@ def reconcile_all(
             all_reconciled = False
             logger.warning(
                 "Reconciliation failed for %s: %s",
-                stmt.month_label, "; ".join(result.warnings),
+                stmt.month_label,
+                "; ".join(result.warnings),
             )
 
     # Check continuity between statements
@@ -99,23 +93,29 @@ def reconcile_all(
         prev_ending = statements[i - 1].ending_balance
         curr_beginning = statements[i].beginning_balance
         if abs(prev_ending - curr_beginning) > tolerance:
-            results.append(ReconciliationResult(
-                statement_label=f"Continuity: {statements[i-1].month_label} -> {statements[i].month_label}",
-                passed=False,
-                parsed_credit_count=0, expected_credit_count=0,
-                parsed_debit_count=0, expected_debit_count=0,
-                parsed_credit_total=Decimal("0"), expected_credit_total=Decimal("0"),
-                parsed_debit_total=Decimal("0"), expected_debit_total=Decimal("0"),
-                beginning_balance=prev_ending,
-                ending_balance=curr_beginning,
-                calculated_ending=prev_ending,
-                balance_ok=False,
-                warnings=[
-                    f"Balance discontinuity: prev ending={prev_ending}, "
-                    f"curr beginning={curr_beginning}, "
-                    f"gap={curr_beginning - prev_ending}"
-                ],
-            ))
+            results.append(
+                ReconciliationResult(
+                    statement_label=f"Continuity: {statements[i - 1].month_label} -> {statements[i].month_label}",
+                    passed=False,
+                    parsed_credit_count=0,
+                    expected_credit_count=0,
+                    parsed_debit_count=0,
+                    expected_debit_count=0,
+                    parsed_credit_total=Decimal("0"),
+                    expected_credit_total=Decimal("0"),
+                    parsed_debit_total=Decimal("0"),
+                    expected_debit_total=Decimal("0"),
+                    beginning_balance=prev_ending,
+                    ending_balance=curr_beginning,
+                    calculated_ending=prev_ending,
+                    balance_ok=False,
+                    warnings=[
+                        f"Balance discontinuity: prev ending={prev_ending}, "
+                        f"curr beginning={curr_beginning}, "
+                        f"gap={curr_beginning - prev_ending}"
+                    ],
+                )
+            )
             all_reconciled = False
 
     forced = allow_mismatch and not all_reconciled

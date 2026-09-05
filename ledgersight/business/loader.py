@@ -1,4 +1,5 @@
 """Shared statement loading for CLI and TUI."""
+
 from __future__ import annotations
 
 import logging

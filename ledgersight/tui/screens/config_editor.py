@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import cast
 
 from textual import on
 from textual.app import ComposeResult
@@ -79,7 +80,7 @@ def _extract_tail(path: Path) -> str:
     match = re.search(r"\n\[cpa\].*?(?=\n\[)", raw, re.DOTALL)
     if not match:
         return ""
-    return "\n" + raw[match.end():]
+    return "\n" + raw[match.end() :]
 
 
 class ConfigEditorScreen(Screen[None]):
@@ -128,14 +129,17 @@ class ConfigEditorScreen(Screen[None]):
             with Horizontal(classes="form-row"):
                 yield Label("Entity Type:", classes="form-label")
                 yield Select(
-                    [("Sole Proprietor", "sole-prop"),
-                     ("Single-Member LLC", "single-member-llc"),
-                     ("Partnership", "partnership"),
-                     ("S-Corp", "s-corp"),
-                     ("C-Corp", "c-corp"),
-                     ("Other", "other")],
+                    [
+                        ("Sole Proprietor", "sole-prop"),
+                        ("Single-Member LLC", "single-member-llc"),
+                        ("Partnership", "partnership"),
+                        ("S-Corp", "s-corp"),
+                        ("C-Corp", "c-corp"),
+                        ("Other", "other"),
+                    ],
                     id="entity_type",
                     value="sole-prop",
+                    allow_blank=False,
                     classes="form-input",
                 )
             with Horizontal(classes="form-row"):
@@ -147,11 +151,23 @@ class ConfigEditorScreen(Screen[None]):
             with Horizontal(classes="form-row"):
                 yield Label("Fiscal Year Start:", classes="form-label")
                 yield Select(
-                    [("January", 1), ("February", 2), ("March", 3),
-                     ("April", 4), ("May", 5), ("June", 6),
-                     ("July", 7), ("August", 8), ("September", 9),
-                     ("October", 10), ("November", 11), ("December", 12)],
+                    [
+                        ("January", 1),
+                        ("February", 2),
+                        ("March", 3),
+                        ("April", 4),
+                        ("May", 5),
+                        ("June", 6),
+                        ("July", 7),
+                        ("August", 8),
+                        ("September", 9),
+                        ("October", 10),
+                        ("November", 11),
+                        ("December", 12),
+                    ],
                     id="fiscal_year_start",
+                    value=1,
+                    allow_blank=False,
                 )
             yield Static("")
             yield Static("CPA Information", classes="section-title")
@@ -205,9 +221,12 @@ class ConfigEditorScreen(Screen[None]):
 
             try:
                 tax_year = int(self.query_one("#tax_year", Input).value or config.tax_year)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 self.notify("Tax year must be a number", severity="error")
                 return
+
+            entity_type_val = cast(str, self.query_one("#entity_type", Select).value)
+            fiscal_start_val = cast(int, self.query_one("#fiscal_year_start", Select).value)
 
             config = replace(
                 config,
@@ -217,12 +236,9 @@ class ConfigEditorScreen(Screen[None]):
                 phone=self.query_one("#phone", Input).value,
                 email=self.query_one("#email", Input).value,
                 industry=self.query_one("#industry", Input).value,
-                entity_type=self.query_one("#entity_type", Select).value or config.entity_type,
+                entity_type=entity_type_val or config.entity_type,
                 tax_year=tax_year,
-                fiscal_year_start=int(
-                    self.query_one("#fiscal_year_start", Select).value
-                    or config.fiscal_year_start
-                ),
+                fiscal_year_start=fiscal_start_val or config.fiscal_year_start,
                 cpa_name=self.query_one("#cpa_name", Input).value,
                 cpa_firm=self.query_one("#cpa_firm", Input).value,
                 cpa_email=self.query_one("#cpa_email", Input).value,

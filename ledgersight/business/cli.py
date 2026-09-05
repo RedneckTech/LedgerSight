@@ -1,4 +1,5 @@
 """Business report CLI (headless mode)."""
+
 from __future__ import annotations
 
 import argparse
@@ -41,68 +42,53 @@ Examples:
   python3 business_financial_report.py --self-test
         """,
     )
-    parser.add_argument("--config", type=str, default=None,
-                        help=f"Path to TOML config (default: {_DEFAULT_CONFIG})")
-    parser.add_argument("--init-config", action="store_true",
-                        help="Generate example TOML configuration file")
-    parser.add_argument("--force", action="store_true",
-                        help="Overwrite existing config with --init-config")
-    parser.add_argument("--business-name", type=str, default=None,
-                        help="Override business name")
-    parser.add_argument("--year", type=int,
-                        help="Filter to a specific year")
-    parser.add_argument("--month", type=int, choices=range(1, 13),
-                        help="Filter to a specific month (1-12)")
-    parser.add_argument("--quarter", type=int, choices=range(1, 5),
-                        help="Filter to a specific quarter (1-4)")
-    parser.add_argument("--start-date", type=str, default=None,
-                        help="Filter from date YYYY-MM-DD")
-    parser.add_argument("--end-date", type=str, default=None,
-                        help="Filter to date YYYY-MM-DD")
-    parser.add_argument("--mode", type=str,
-                        choices=["combined", "monthly", "quarterly", "yearly", "cpa"],
-                        default=None,
-                        help="Report mode")
-    parser.add_argument("-o", "--output", type=str, default=None,
-                        help="Output PDF path")
-    parser.add_argument("-d", "--directory", type=str, default=None,
-                        help="Directory containing statement PDFs")
-    parser.add_argument("--audit", action="store_true",
-                        help="Export transaction audit CSV")
-    parser.add_argument("--export-pl", action="store_true",
-                        help="Export P&L CSV")
-    parser.add_argument("--export-cpa", action="store_true",
-                        help="Export CPA package CSV files")
-    parser.add_argument("--export-category-template", action="store_true",
-                        help="Export category template CSV for editing")
-    parser.add_argument("--projections", action="store_true",
-                        help="Include financial projections")
-    parser.add_argument("--projection-months", type=int, default=None,
-                        help="Number of months to project (overrides config)")
-    parser.add_argument("--scenario", type=str,
-                        choices=["conservative", "base", "growth", "all"],
-                        default="all",
-                        help="Projection scenario")
-    parser.add_argument("--mask", action="store_true",
-                        help="Mask personal information in output")
-    parser.add_argument("--mask-ein", action="store_true",
-                        help="Mask EIN in output")
-    parser.add_argument("--allow-mismatch", action="store_true",
-                        help="Generate report even if reconciliation fails")
-    parser.add_argument("--allow-review-items", action="store_true",
-                        help="Generate report even with uncategorized transactions")
-    parser.add_argument("--strict", action="store_true",
-                        help="Exit with error on any reconciliation warning")
-    parser.add_argument("--verbose", action="store_true",
-                        help="Verbose output")
-    parser.add_argument("--overwrite", action="store_true",
-                        help="Overwrite existing output files")
-    parser.add_argument("--full-detail", action="store_true",
-                        help="Include every transaction rather than 50 per month")
-    parser.add_argument("--debug", action="store_true",
-                        help="Debug output")
-    parser.add_argument("--self-test", action="store_true",
-                        help="Run built-in self-tests")
+    parser.add_argument("--config", type=str, default=None, help=f"Path to TOML config (default: {_DEFAULT_CONFIG})")
+    parser.add_argument("--init-config", action="store_true", help="Generate example TOML configuration file")
+    parser.add_argument("--force", action="store_true", help="Overwrite existing config with --init-config")
+    parser.add_argument("--business-name", type=str, default=None, help="Override business name")
+    parser.add_argument("--year", type=int, help="Filter to a specific year")
+    parser.add_argument("--month", type=int, choices=range(1, 13), help="Filter to a specific month (1-12)")
+    parser.add_argument("--quarter", type=int, choices=range(1, 5), help="Filter to a specific quarter (1-4)")
+    parser.add_argument("--start-date", type=str, default=None, help="Filter from date YYYY-MM-DD")
+    parser.add_argument("--end-date", type=str, default=None, help="Filter to date YYYY-MM-DD")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["combined", "monthly", "quarterly", "yearly", "cpa"],
+        default=None,
+        help="Report mode",
+    )
+    parser.add_argument("-o", "--output", type=str, default=None, help="Output PDF path")
+    parser.add_argument("-d", "--directory", type=str, default=None, help="Directory containing statement PDFs")
+    parser.add_argument("--audit", action="store_true", help="Export transaction audit CSV")
+    parser.add_argument("--export-pl", action="store_true", help="Export P&L CSV")
+    parser.add_argument("--export-cpa", action="store_true", help="Export CPA package CSV files")
+    parser.add_argument(
+        "--export-category-template", action="store_true", help="Export category template CSV for editing"
+    )
+    parser.add_argument("--projections", action="store_true", help="Include financial projections")
+    parser.add_argument(
+        "--projection-months", type=int, default=None, help="Number of months to project (overrides config)"
+    )
+    parser.add_argument(
+        "--scenario",
+        type=str,
+        choices=["conservative", "base", "growth", "all"],
+        default="all",
+        help="Projection scenario",
+    )
+    parser.add_argument("--mask", action="store_true", help="Mask personal information in output")
+    parser.add_argument("--mask-ein", action="store_true", help="Mask EIN in output")
+    parser.add_argument("--allow-mismatch", action="store_true", help="Generate report even if reconciliation fails")
+    parser.add_argument(
+        "--allow-review-items", action="store_true", help="Generate report even with uncategorized transactions"
+    )
+    parser.add_argument("--strict", action="store_true", help="Exit with error on any reconciliation warning")
+    parser.add_argument("--verbose", action="store_true", help="Verbose output")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output files")
+    parser.add_argument("--full-detail", action="store_true", help="Include every transaction rather than 50 per month")
+    parser.add_argument("--debug", action="store_true", help="Debug output")
+    parser.add_argument("--self-test", action="store_true", help="Run built-in self-tests")
     args = parser.parse_args()
 
     log_level = logging.WARNING
@@ -132,7 +118,8 @@ Examples:
         else:
             candidates = sorted(
                 SCRIPT_DIR.glob("business_report*.toml"),
-                key=lambda p: p.stat().st_mtime, reverse=True,
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
             )
             config_path = candidates[0] if candidates else default_path
     if not config_path.is_absolute():
@@ -190,36 +177,33 @@ Examples:
 
     target_year = args.year
     if args.month and not target_year:
-        matching_years = sorted({
-            s.year for s in statements if s.month == args.month
-        })
+        matching_years = sorted({s.year for s in statements if s.month == args.month})
         if not matching_years:
             logger.error("No statements found for month %s.", args.month)
             sys.exit(1)
         target_year = matching_years[-1]
         if len(matching_years) > 1:
             logger.info(
-                "Note: --month without --year, using latest year %s "
-                "(found: %s). Use --year to override.",
-                target_year, matching_years,
+                "Note: --month without --year, using latest year %s (found: %s). Use --year to override.",
+                target_year,
+                matching_years,
             )
 
     if args.quarter and not target_year:
         fy_start = config.fiscal_year_start
         q_months = _fiscal_quarter_months(args.quarter, fy_start)
         from ledgersight.business.periods import statement_fiscal_year
-        matching_fys = sorted({
-            statement_fiscal_year(s, fy_start) for s in statements if s.month in q_months
-        })
+
+        matching_fys = sorted({statement_fiscal_year(s, fy_start) for s in statements if s.month in q_months})
         if not matching_fys:
             logger.error("No statements found for quarter %s.", args.quarter)
             sys.exit(1)
         target_year = matching_fys[-1]
         if len(matching_fys) > 1:
             logger.info(
-                "Note: --quarter without --year, using latest year %s "
-                "(found: %s). Use --year to override.",
-                target_year, matching_fys,
+                "Note: --quarter without --year, using latest year %s (found: %s). Use --year to override.",
+                target_year,
+                matching_fys,
             )
 
     if args.output:

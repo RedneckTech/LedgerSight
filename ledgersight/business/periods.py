@@ -1,4 +1,5 @@
 """Financial period helpers for P&L and projections."""
+
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
@@ -31,13 +32,15 @@ def get_period_months(year: int, month: int) -> list[FinancialPeriod]:
             ed = date(year, 12, 31)
         else:
             ed = date(year, m + 1, 1) - timedelta(days=1)
-        periods.append(FinancialPeriod(
-            label=datetime(year, m, 1).strftime("%B %Y"),
-            start_date=sd,
-            end_date=ed,
-            months=1,
-            year=year,
-        ))
+        periods.append(
+            FinancialPeriod(
+                label=datetime(year, m, 1).strftime("%B %Y"),
+                start_date=sd,
+                end_date=ed,
+                months=1,
+                year=year,
+            )
+        )
     return periods
 
 
@@ -93,11 +96,13 @@ def get_quarter_periods(year: int) -> list[FinancialPeriod]:
             ed = date(year, 12, 31)
         else:
             ed = date(year, m_end + 1, 1) - timedelta(days=1)
-        periods.append(FinancialPeriod(
-            label=f"{label} {year}",
-            start_date=sd,
-            end_date=ed,
-            months=3,
-            year=year,
-        ))
+        periods.append(
+            FinancialPeriod(
+                label=f"{label} {year}",
+                start_date=sd,
+                end_date=ed,
+                months=3,
+                year=year,
+            )
+        )
     return periods

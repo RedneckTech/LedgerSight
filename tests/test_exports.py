@@ -12,9 +12,15 @@ from tests.conftest import make_stmt, make_tx
 class TestCSVExports(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        tx = make_tx(description="FUEL PURCHASE", amount="200.00", is_credit=False,
-                     business_category="Fuel", tax_category="Vehicle Fuel",
-                     include_in_pnl=True, deductibility="likely-deductible")
+        tx = make_tx(
+            description="FUEL PURCHASE",
+            amount="200.00",
+            is_credit=False,
+            business_category="Fuel",
+            tax_category="Vehicle Fuel",
+            include_in_pnl=True,
+            deductibility="likely-deductible",
+        )
         stmt = make_stmt(transactions=[tx])
         self.statements = [stmt]
         config = BusinessConfig(business_name="Test")
@@ -54,10 +60,16 @@ class TestCSVExports(unittest.TestCase):
         self.assertIn("CurrentBusinessCategory", content)
 
     def test_csv_formula_prefix_is_escaped(self):
-        tx = make_tx(description="=SUM(A1:A10)", amount="100.00", is_credit=False,
-                     business_category="=DANGEROUS", tax_category="+BAD",
-                     deductibility="@INJECT", review_reason="-EXPLOIT",
-                     include_in_pnl=True)
+        tx = make_tx(
+            description="=SUM(A1:A10)",
+            amount="100.00",
+            is_credit=False,
+            business_category="=DANGEROUS",
+            tax_category="+BAD",
+            deductibility="@INJECT",
+            review_reason="-EXPLOIT",
+            include_in_pnl=True,
+        )
         stmt = make_stmt(transactions=[tx])
         config = BusinessConfig(business_name="Test")
         pl = build_pl([tx])
@@ -72,9 +84,13 @@ class TestCSVExports(unittest.TestCase):
         self.assertIn("'-EXPLOIT", content)
 
     def test_csv_encoding_is_utf8(self):
-        tx = make_tx(description="caf\u00e9 \u20ac100", amount="50.00", is_credit=True,
-                     business_category="M\u00fcnchen Services",
-                     include_in_pnl=True)
+        tx = make_tx(
+            description="caf\u00e9 \u20ac100",
+            amount="50.00",
+            is_credit=True,
+            business_category="M\u00fcnchen Services",
+            include_in_pnl=True,
+        )
         stmt = make_stmt(transactions=[tx])
         config = BusinessConfig(business_name="Test")
         pl = build_pl([tx])

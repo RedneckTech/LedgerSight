@@ -1,4 +1,5 @@
 """Cash-basis Profit & Loss calculation."""
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -65,16 +66,25 @@ class ProfitAndLoss:
 
     @property
     def non_pnl_credits(self) -> Decimal:
-        return (self.owner_contributions + self.loan_proceeds
-                + self.payment_reversal_credits
-                + self.account_transfers_credits + self.uncategorized_non_pnl_credits)
+        return (
+            self.owner_contributions
+            + self.loan_proceeds
+            + self.payment_reversal_credits
+            + self.account_transfers_credits
+            + self.uncategorized_non_pnl_credits
+        )
 
     @property
     def non_pnl_debits(self) -> Decimal:
-        return (self.owner_distributions + self.loan_principal_payments
-                + self.fixed_asset_purchases + self.account_transfers_debits
-                + self.credit_card_transfers + self.uncategorized_non_pnl_debits
-                + self.payment_reversal_debits)
+        return (
+            self.owner_distributions
+            + self.loan_principal_payments
+            + self.fixed_asset_purchases
+            + self.account_transfers_debits
+            + self.credit_card_transfers
+            + self.uncategorized_non_pnl_debits
+            + self.payment_reversal_debits
+        )
 
     @property
     def total_revenue(self) -> Decimal:
@@ -124,14 +134,17 @@ class ProfitAndLoss:
 _OTHER_INCOME_CATS = {"Interest Income", "Other Income"}
 _OTHER_EXPENSE_CATS = {"Loan Interest"}
 _DIRECT_COST_CATS = {
-    "Fuel", "Freight and Shipping", "Subcontractors", "Direct Labor",
-    "Materials and Supplies", "Equipment Rental", "Tolls and Scale Fees",
+    "Fuel",
+    "Freight and Shipping",
+    "Subcontractors",
+    "Direct Labor",
+    "Materials and Supplies",
+    "Equipment Rental",
+    "Tolls and Scale Fees",
     "Other Direct Costs",
 }
 _INCOME_CAT_SET = set(_INCOME_CATEGORIES.keys()) - _OTHER_INCOME_CATS
-_OP_EXPENSE_CATS = (
-    set(_EXPENSE_CATEGORIES.keys()) - _DIRECT_COST_CATS - _OTHER_EXPENSE_CATS
-)
+_OP_EXPENSE_CATS = set(_EXPENSE_CATEGORIES.keys()) - _DIRECT_COST_CATS - _OTHER_EXPENSE_CATS
 
 
 def build_pl(
@@ -190,8 +203,9 @@ def build_pl(
         # ---- Payment reversals — try to match to original expense ----
         if cat == "Payment Reversal" and tx.is_credit:
             merchant = normalize_merchant(tx.description)
-            candidates = [(idx, dt) for idx, dt in debit_by_merchant.get(merchant, [])
-                          if idx not in matched_debit_indices]
+            candidates = [
+                (idx, dt) for idx, dt in debit_by_merchant.get(merchant, []) if idx not in matched_debit_indices
+            ]
             best = _find_best_reversal_match(tx, candidates) if candidates else None
             if best is not None:
                 best_idx, best_dt = best

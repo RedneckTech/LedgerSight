@@ -51,15 +51,12 @@ class TestDataRedaction(unittest.TestCase):
 
     def test_phone_numbers_redacted(self):
         redactor = DataRedactor(mask_personal=True)
-        self.assertEqual(redactor.description("Call 555-555-1212"),
-                         "Call [PHONE]")
-        self.assertEqual(redactor.description("(555) 555-1212 office"),
-                         "[PHONE] office")
+        self.assertEqual(redactor.description("Call 555-555-1212"), "Call [PHONE]")
+        self.assertEqual(redactor.description("(555) 555-1212 office"), "[PHONE] office")
 
     def test_emails_redacted(self):
         redactor = DataRedactor(mask_personal=True)
-        self.assertEqual(redactor.description("Email john@example.com"),
-                         "Email [EMAIL]")
+        self.assertEqual(redactor.description("Email john@example.com"), "Email [EMAIL]")
 
     def test_stable_pseudonyms(self):
         redactor = DataRedactor(mask_personal=True)
@@ -70,8 +67,7 @@ class TestDataRedaction(unittest.TestCase):
 
     def test_account_numbers_redacted(self):
         redactor = DataRedactor(mask_personal=True)
-        self.assertEqual(redactor.description("Acct XXXX2136"),
-                         "Acct [ACCOUNT]")
+        self.assertEqual(redactor.description("Acct XXXX2136"), "Acct [ACCOUNT]")
 
     def test_source_path_pseudonyms(self):
         redactor = DataRedactor(mask_personal=True)

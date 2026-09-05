@@ -1,4 +1,5 @@
 """Business financial report PDF builder and orchestration."""
+
 from __future__ import annotations
 
 import hashlib
@@ -6,7 +7,7 @@ import logging
 import os
 import shutil
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -59,6 +60,14 @@ class ReportBuildResult:
     quarterly_pls: dict[tuple[int, int], ProfitAndLoss]
     projections: list[ProjectionResult] | None
     recon_results: list[ReconciliationResult]
+
+
+@dataclass
+class _TaxGroup:
+    count: int = 0
+    total: Decimal = Decimal("0")
+    cats: set[str] = field(default_factory=set)
+    review: bool = False
 
 
 # =============================================================================
@@ -155,19 +164,18 @@ class ReportBuilder:
             pdf.set_font(pdf.body_font, "B", 10)
             pdf.set_text_color(180, 60, 60)
             pdf.multi_cell(
-                0, 5,
+                0,
+                5,
                 "Financial projections were withheld because classified revenue is "
                 "insufficient or too many transactions remain under CPA review. "
-                "Re-run after categorizing more transactions to enable projections."
+                "Re-run after categorizing more transactions to enable projections.",
             )
         elif self.mode in ("combined", "yearly"):
             pdf.ln(4)
             pdf.set_font(pdf.body_font, "I", 8)
             pdf.set_text_color(130, 130, 130)
             pdf.multi_cell(
-                0, 4,
-                "Financial projections not requested. "
-                "Use --projections to include forward-looking estimates."
+                0, 4, "Financial projections not requested. Use --projections to include forward-looking estimates."
             )
 
         if self.mode in ("combined", "yearly"):
@@ -196,13 +204,16 @@ class ReportBuilder:
 
         pdf.set_font(pdf.body_font, "", 10)
         pdf.set_text_color(100, 100, 100)
-        if self.period_start_date or self.period_end_date:
-            if self.period_start_date and self.period_end_date:
-                dr = f"{self.period_start_date.strftime('%B %d, %Y')}  to  {self.period_end_date.strftime('%B %d, %Y')}"
-            elif self.period_start_date:
-                dr = f"{self.period_start_date.strftime('%B %d, %Y')}  to  {self.statements[-1].month_label}"
+        start_date = self.period_start_date
+        end_date = self.period_end_date
+        if start_date or end_date:
+            if start_date and end_date:
+                dr = f"{start_date.strftime('%B %d, %Y')}  to  {end_date.strftime('%B %d, %Y')}"
+            elif start_date:
+                dr = f"{start_date.strftime('%B %d, %Y')}  to  {self.statements[-1].month_label}"
             else:
-                dr = f"{self.statements[0].month_label}  to  {self.period_end_date.strftime('%B %d, %Y')}"
+                assert end_date is not None
+                dr = f"{self.statements[0].month_label}  to  {end_date.strftime('%B %d, %Y')}"
             pdf.cell(0, 7, dr, align="C", new_x="LMARGIN", new_y="NEXT")
         elif len(self.statements) > 0:
             dr = f"{self.statements[0].month_label}  to  {self.statements[-1].month_label}"
@@ -221,9 +232,14 @@ class ReportBuilder:
         if len(self.statements) < 12:
             pdf.set_font(pdf.body_font, "B", 8)
             pdf.set_text_color(180, 120, 40)
-            pdf.cell(0, 5,
-                     f"Partial-year report \u2014 {12 - len(self.statements)} month(s) not included",
-                     align="C", new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(
+                0,
+                5,
+                f"Partial-year report \u2014 {12 - len(self.statements)} month(s) not included",
+                align="C",
+                new_x="LMARGIN",
+                new_y="NEXT",
+            )
         pdf.ln(8)
 
         summary_rows = [
@@ -248,7 +264,8 @@ class ReportBuilder:
         if self.forced_generation:
             pdf.body_text(
                 "Reconciliation: FAILED \u2014 report generation was forced "
-                "(--allow-mismatch). Financial totals are NOT validated.", size=8,
+                "(--allow-mismatch). Financial totals are NOT validated.",
+                size=8,
             )
         elif self.all_reconciled:
             pdf.body_text("Reconciliation: PASSED", size=8)
@@ -256,15 +273,14 @@ class ReportBuilder:
             pdf.body_text("Reconciliation: FAILED - see Data Quality section", size=8)
 
         total_tx = sum(len(s.transactions) for s in self.statements)
-        cpa_review_count = sum(
-            1 for s in self.statements for tx in s.transactions if tx.cpa_review
-        )
+        cpa_review_count = sum(1 for s in self.statements for tx in s.transactions if tx.cpa_review)
         pdf.body_text(f"Total Transactions: {total_tx}", size=8)
         if cpa_review_count > 0:
             pdf.set_font(pdf.body_font, "B", 8)
             pdf.set_text_color(180, 60, 60)
             pdf.multi_cell(
-                0, 4.5,
+                0,
+                4.5,
                 f"PRELIMINARY P&L \u2014 {cpa_review_count} of {total_tx} transactions "
                 f"require classification. Revenue and expense totals may change materially.",
             )
@@ -275,19 +291,18 @@ class ReportBuilder:
         if self.mask_personal:
             pdf.set_font(pdf.body_font, "I", 7)
             pdf.set_text_color(130, 130, 130)
-            pdf.cell(0, 5, "Personally identifiable information has been redacted.",
-                     new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(0, 5, "Personally identifiable information has been redacted.", new_x="LMARGIN", new_y="NEXT")
             pdf.ln(3)
-        if self.period_start_date or self.period_end_date:
-            if self.period_start_date and self.period_end_date:
-                period_label = (
-                    f"{self.period_start_date.strftime('%B %d, %Y')} - "
-                    f"{self.period_end_date.strftime('%B %d, %Y')}"
-                )
-            elif self.period_start_date:
-                period_label = f"{self.period_start_date.strftime('%B %d, %Y')} - {self.statements[-1].month_label}"
+        start_date = self.period_start_date
+        end_date = self.period_end_date
+        if start_date or end_date:
+            if start_date and end_date:
+                period_label = f"{start_date.strftime('%B %d, %Y')} - {end_date.strftime('%B %d, %Y')}"
+            elif start_date:
+                period_label = f"{start_date.strftime('%B %d, %Y')} - {self.statements[-1].month_label}"
             else:
-                period_label = f"{self.statements[0].month_label} - {self.period_end_date.strftime('%B %d, %Y')}"
+                assert end_date is not None
+                period_label = f"{self.statements[0].month_label} - {end_date.strftime('%B %d, %Y')}"
         else:
             period_label = f"{self.statements[0].month_label} - {self.statements[-1].month_label}"
         pdf.body_text(
@@ -301,18 +316,15 @@ class ReportBuilder:
         gross = self.pl.gross_profit
         net = self.pl.net_profit
 
-        total_in = sum(
-            (s.total_credits for s in self.statements), Decimal("0")
-        )
-        total_out = sum(
-            (s.total_debits for s in self.statements), Decimal("0")
-        )
+        total_in = sum((s.total_credits for s in self.statements), Decimal("0"))
+        total_out = sum((s.total_debits for s in self.statements), Decimal("0"))
         start_bal = self.statements[0].beginning_balance
         end_bal = self.statements[-1].ending_balance
         net_cash = end_bal - start_bal
 
         uncategorized_count = sum(
-            1 for s in self.statements
+            1
+            for s in self.statements
             for tx in s.transactions
             if tx.business_category == "Uncategorized" or tx.cpa_review
         )
@@ -346,22 +358,19 @@ class ReportBuilder:
         )
 
         total_tx = sum(len(s.transactions) for s in self.statements)
-        cpa_review_count = sum(
-            1 for s in self.statements for tx in s.transactions if tx.cpa_review
-        )
+        cpa_review_count = sum(1 for s in self.statements for tx in s.transactions if tx.cpa_review)
         classified_count = total_tx - cpa_review_count
         classified_pct = (classified_count / max(total_tx, 1)) * 100
         unclass_credits = sum(
-            tx.amount for s in self.statements for tx in s.transactions
-            if tx.cpa_review and tx.is_credit
+            (tx.amount for s in self.statements for tx in s.transactions if tx.cpa_review and tx.is_credit),
+            Decimal("0"),
         )
         unclass_debits = sum(
-            tx.amount for s in self.statements for tx in s.transactions
-            if tx.cpa_review and not tx.is_credit
+            (tx.amount for s in self.statements for tx in s.transactions if tx.cpa_review and not tx.is_credit),
+            Decimal("0"),
         )
         pnl_status = (
-            "Preliminary \u2014 classification incomplete" if classified_pct < 80
-            else "Substantially classified"
+            "Preliminary \u2014 classification incomplete" if classified_pct < 80 else "Substantially classified"
         )
         if classified_pct < 50:
             pnl_status = "Highly Preliminary \u2014 majority unclassified"
@@ -385,17 +394,18 @@ class ReportBuilder:
         rows = []
         for rr in self.recon_results:
             status = "PASS" if rr.passed else ("FORCED" if rr.forced else "FAIL")
-            rows.append([
-                rr.statement_label,
-                status,
-                "Yes" if rr.parsed_credit_count == rr.expected_credit_count else "No",
-                "Yes" if rr.parsed_debit_count == rr.expected_debit_count else "No",
-                "Yes" if rr.balance_ok else "No",
-                "; ".join(rr.warnings)[:80],
-            ])
+            rows.append(
+                [
+                    rr.statement_label,
+                    status,
+                    "Yes" if rr.parsed_credit_count == rr.expected_credit_count else "No",
+                    "Yes" if rr.parsed_debit_count == rr.expected_debit_count else "No",
+                    "Yes" if rr.balance_ok else "No",
+                    "; ".join(rr.warnings)[:80],
+                ]
+            )
         cw = [35, 14, 18, 18, 18, 70]
-        pdf.draw_table(headers, rows, col_widths=cw,
-                       section_label="Reconciliation Status")
+        pdf.draw_table(headers, rows, col_widths=cw, section_label="Reconciliation Status")
 
         if len(self.statements) >= 2:
             all_dates = sorted(s.date_obj for s in self.statements)
@@ -419,18 +429,20 @@ class ReportBuilder:
         headers = ["Month", "Start Balance", "End Balance", "Change", "Credits", "Debits"]
         rows = []
         for s in self.statements:
-            rows.append([
-                s.month_label,
-                fmt_dollar(s.beginning_balance),
-                fmt_dollar(s.ending_balance),
-                fmt_dollar(s.ending_balance - s.beginning_balance),
-                fmt_dollar(s.total_credits),
-                fmt_dollar(s.total_debits),
-            ])
+            rows.append(
+                [
+                    s.month_label,
+                    fmt_dollar(s.beginning_balance),
+                    fmt_dollar(s.ending_balance),
+                    fmt_dollar(s.ending_balance - s.beginning_balance),
+                    fmt_dollar(s.total_credits),
+                    fmt_dollar(s.total_debits),
+                ]
+            )
         cw = [30, 30, 30, 30, 30, 30]
-        pdf.draw_table(headers, rows, col_widths=cw,
-                       col_aligns=["L", "R", "R", "R", "R", "R"],
-                       section_label="Monthly Balances")
+        pdf.draw_table(
+            headers, rows, col_widths=cw, col_aligns=["L", "R", "R", "R", "R", "R"], section_label="Monthly Balances"
+        )
 
     def _revenue_expense_overview(self, pdf: ReportPDF):
         pdf.add_page()
@@ -486,8 +498,7 @@ class ReportBuilder:
             if data_rows:
                 pdf.draw_table(
                     ["Category", "Amount", "% of Revenue"],
-                    [r + [safe_pct(parse_amount(r[1]), total_rev)]
-                     for r in data_rows],
+                    [r + [safe_pct(parse_amount(r[1]), total_rev)] for r in data_rows],
                     col_widths=cw,
                     col_aligns=["L", "R", "R"],
                     header_font_size=7,
@@ -501,24 +512,20 @@ class ReportBuilder:
             pdf.ln(3)
 
         _section("Revenue", income_rows, "Total Revenue", total_rev)
-        _section("Cost of Goods Sold / Direct Costs", cogs_rows,
-                 "Total COGS / Direct Costs", pl.total_direct_costs)
+        _section("Cost of Goods Sold / Direct Costs", cogs_rows, "Total COGS / Direct Costs", pl.total_direct_costs)
         pdf.set_font(pdf.body_font, "B", 9)
         pdf.cell(60, 6, "Gross Profit")
         pdf.cell(30, 6, fmt_dollar(pl.gross_profit), align="R")
         pdf.cell(30, 6, pl.gross_margin, align="R", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(4)
-        _section("Operating Expenses", op_exp_rows,
-                 "Total Operating Expenses", pl.total_operating_expenses)
+        _section("Operating Expenses", op_exp_rows, "Total Operating Expenses", pl.total_operating_expenses)
         pdf.set_font(pdf.body_font, "B", 9)
         pdf.cell(60, 6, "Operating Profit (Loss)")
         pdf.cell(30, 6, fmt_dollar(pl.operating_profit), align="R")
         pdf.cell(30, 6, pl.operating_margin, align="R", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(4)
-        _section("Other Income", other_inc_rows,
-                 "Total Other Income", pl.total_other_income)
-        _section("Other Expense", other_exp_rows,
-                 "Total Other Expense", pl.total_other_expense)
+        _section("Other Income", other_inc_rows, "Total Other Income", pl.total_other_income)
+        _section("Other Expense", other_exp_rows, "Total Other Expense", pl.total_other_expense)
         pdf.set_font(pdf.body_font, "B", 10)
         pdf.set_fill_color(44, 62, 80)
         pdf.set_text_color(255, 255, 255)
@@ -539,27 +546,23 @@ class ReportBuilder:
             ("Account Transfers (credits)", fmt_dollar(pl.account_transfers_credits)),
             ("Account Transfers (debits)", fmt_dollar(pl.account_transfers_debits)),
             ("Credit Card Transfers", fmt_dollar(pl.credit_card_transfers)),
-            ("",
-             "--- Items Requiring CPA Review ---"),
-            ("Unclassified Credits (excluded from P&L)",
-             fmt_dollar(pl.uncategorized_non_pnl_credits)),
-            ("Unclassified Debits (excluded from P&L)",
-             fmt_dollar(pl.uncategorized_non_pnl_debits)),
+            ("", "--- Items Requiring CPA Review ---"),
+            ("Unclassified Credits (excluded from P&L)", fmt_dollar(pl.uncategorized_non_pnl_credits)),
+            ("Unclassified Debits (excluded from P&L)", fmt_dollar(pl.uncategorized_non_pnl_debits)),
         ]
         pdf.draw_kv_table(non_pl_rows)
         pdf.ln(2)
-        cpa_review_count = sum(
-            1 for s in self.statements for tx in s.transactions if tx.cpa_review
-        )
+        cpa_review_count = sum(1 for s in self.statements for tx in s.transactions if tx.cpa_review)
         total_tx = sum(len(s.transactions) for s in self.statements)
         if cpa_review_count > 0:
             pdf.set_font(pdf.body_font, "B", 9)
             pdf.set_text_color(180, 60, 60)
             pdf.multi_cell(
-                0, 5,
+                0,
+                5,
                 f"PRELIMINARY P&L \u2014 {cpa_review_count} of {total_tx} "
                 f"transactions remain unclassified or require CPA confirmation. "
-                f"Revenue and expense totals may change materially after classification."
+                f"Revenue and expense totals may change materially after classification.",
             )
 
     def _monthly_pnl(self, pdf: ReportPDF):
@@ -614,14 +617,15 @@ class ReportBuilder:
                     totals_row.append(fmt_dollar(val))
                 totals_row.append(fmt_dollar(ytd_total))
                 sec_rows.append(totals_row)
-            pdf.draw_table(headers, sec_rows, col_widths=cw,
-                           col_aligns=["L"] + ["R"] * (len(keys) + 1),
-                           section_label=title)
+            pdf.draw_table(
+                headers, sec_rows, col_widths=cw, col_aligns=["L"] + ["R"] * (len(keys) + 1), section_label=title
+            )
 
         _add_section("Revenue", "R", lambda pl: pl.revenue, lambda pl: pl.total_revenue)
         _add_section("Direct Costs / COGS", "D", lambda pl: pl.direct_costs, lambda pl: pl.total_direct_costs)
         _add_section(
-            "Operating Expenses", "O",
+            "Operating Expenses",
+            "O",
             lambda pl: pl.operating_expenses,
             lambda pl: pl.total_operating_expenses,
         )
@@ -629,15 +633,17 @@ class ReportBuilder:
         pdf.sub_title("Profit Summary")
         sum_headers = ["Metric"] + month_labels_short + [period_label]
         sum_rows = [
-            ["Gross Profit"] + [fmt_dollar(self.monthly_pls[k].gross_profit) for k in keys]
+            ["Gross Profit"]
+            + [fmt_dollar(self.monthly_pls[k].gross_profit) for k in keys]
             + [fmt_dollar(sum((self.monthly_pls[k].gross_profit for k in keys), Decimal("0")))],
-            ["Operating Profit"] + [fmt_dollar(self.monthly_pls[k].operating_profit) for k in keys]
+            ["Operating Profit"]
+            + [fmt_dollar(self.monthly_pls[k].operating_profit) for k in keys]
             + [fmt_dollar(sum((self.monthly_pls[k].operating_profit for k in keys), Decimal("0")))],
-            ["Net Profit"] + [fmt_dollar(self.monthly_pls[k].net_profit) for k in keys]
+            ["Net Profit"]
+            + [fmt_dollar(self.monthly_pls[k].net_profit) for k in keys]
             + [fmt_dollar(sum((self.monthly_pls[k].net_profit for k in keys), Decimal("0")))],
         ]
-        pdf.draw_table(sum_headers, sum_rows, col_widths=cw,
-                       col_aligns=["L"] + ["R"] * (len(keys) + 1))
+        pdf.draw_table(sum_headers, sum_rows, col_widths=cw, col_aligns=["L"] + ["R"] * (len(keys) + 1))
 
     def _individual_monthly_pnl(self, pdf: ReportPDF):
         if not self.monthly_pls:
@@ -651,14 +657,18 @@ class ReportBuilder:
             total_rev = pl.total_revenue
 
             pdf.sub_title("Revenue")
-            income_rows = [[cat, fmt_dollar(val),
-                            safe_pct(val, total_rev)]
-                           for cat, val in sorted(pl.revenue.items())
-                           if val != 0]
+            income_rows = [
+                [cat, fmt_dollar(val), safe_pct(val, total_rev)] for cat, val in sorted(pl.revenue.items()) if val != 0
+            ]
             if income_rows:
-                pdf.draw_table(["Category", "Amount", "% of Revenue"], income_rows,
-                               col_widths=[60, 35, 25], col_aligns=["L", "R", "R"],
-                               header_font_size=7, row_font_size=7)
+                pdf.draw_table(
+                    ["Category", "Amount", "% of Revenue"],
+                    income_rows,
+                    col_widths=[60, 35, 25],
+                    col_aligns=["L", "R", "R"],
+                    header_font_size=7,
+                    row_font_size=7,
+                )
             pdf.set_font(pdf.body_font, "B", 8)
             pdf.set_text_color(44, 62, 80)
             pdf.cell(60, 5, "Total Revenue")
@@ -666,42 +676,59 @@ class ReportBuilder:
             pdf.ln(4)
 
             pdf.sub_title("Direct Costs / COGS")
-            cogs_rows = [[cat, fmt_dollar(val),
-                           safe_pct(val, total_rev)]
-                          for cat, val in sorted(pl.direct_costs.items())
-                          if val != 0]
+            cogs_rows = [
+                [cat, fmt_dollar(val), safe_pct(val, total_rev)]
+                for cat, val in sorted(pl.direct_costs.items())
+                if val != 0
+            ]
             if cogs_rows:
-                pdf.draw_table(["Category", "Amount", "% of Revenue"], cogs_rows,
-                               col_widths=[60, 35, 25], col_aligns=["L", "R", "R"],
-                               header_font_size=7, row_font_size=7)
+                pdf.draw_table(
+                    ["Category", "Amount", "% of Revenue"],
+                    cogs_rows,
+                    col_widths=[60, 35, 25],
+                    col_aligns=["L", "R", "R"],
+                    header_font_size=7,
+                    row_font_size=7,
+                )
             pdf.set_font(pdf.body_font, "B", 8)
             pdf.set_text_color(44, 62, 80)
             pdf.cell(60, 5, "Total Direct Costs")
             pdf.cell(35, 5, fmt_dollar(pl.total_direct_costs), align="R", new_x="LMARGIN", new_y="NEXT")
             pdf.ln(2)
             pdf.set_font(pdf.body_font, "B", 9)
-            pdf.cell(60, 6, f"Gross Profit: {fmt_dollar(pl.gross_profit)} ({pl.gross_margin})",
-                     new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(
+                60, 6, f"Gross Profit: {fmt_dollar(pl.gross_profit)} ({pl.gross_margin})", new_x="LMARGIN", new_y="NEXT"
+            )
             pdf.ln(4)
 
             pdf.sub_title("Operating Expenses")
-            op_rows = [[cat, fmt_dollar(val),
-                        safe_pct(val, total_rev)]
-                       for cat, val in sorted(pl.operating_expenses.items())
-                       if val != 0]
+            op_rows = [
+                [cat, fmt_dollar(val), safe_pct(val, total_rev)]
+                for cat, val in sorted(pl.operating_expenses.items())
+                if val != 0
+            ]
             if op_rows:
-                pdf.draw_table(["Category", "Amount", "% of Revenue"], op_rows,
-                               col_widths=[60, 35, 25], col_aligns=["L", "R", "R"],
-                               header_font_size=7, row_font_size=7)
+                pdf.draw_table(
+                    ["Category", "Amount", "% of Revenue"],
+                    op_rows,
+                    col_widths=[60, 35, 25],
+                    col_aligns=["L", "R", "R"],
+                    header_font_size=7,
+                    row_font_size=7,
+                )
             pdf.set_font(pdf.body_font, "B", 8)
             pdf.set_text_color(44, 62, 80)
             pdf.cell(60, 5, "Total Operating Expenses")
-            pdf.cell(35, 5, fmt_dollar(pl.total_operating_expenses), align="R",
-                     new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(35, 5, fmt_dollar(pl.total_operating_expenses), align="R", new_x="LMARGIN", new_y="NEXT")
             pdf.ln(2)
             pdf.set_font(pdf.body_font, "B", 9)
-            pdf.cell(60, 6, f"Operating Profit: {fmt_dollar(pl.operating_profit)} ({pl.operating_margin})",
-                     new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(
+                60,
+                6,
+                f"Operating Profit: {fmt_dollar(pl.operating_profit)} ({pl.operating_margin})",
+                new_x="LMARGIN",
+                new_y="NEXT",
+            )
             pdf.ln(4)
 
             if pl.total_other_income != 0 or pl.total_other_expense != 0:
@@ -711,15 +738,13 @@ class ReportBuilder:
                         if val != 0:
                             pdf.set_font(pdf.body_font, "", 8)
                             pdf.cell(60, 5, f"  {cat}")
-                            pdf.cell(35, 5, fmt_dollar(val), align="R",
-                                     new_x="LMARGIN", new_y="NEXT")
+                            pdf.cell(35, 5, fmt_dollar(val), align="R", new_x="LMARGIN", new_y="NEXT")
                 if pl.total_other_expense != 0:
                     for cat, val in sorted(pl.other_expense.items()):
                         if val != 0:
                             pdf.set_font(pdf.body_font, "", 8)
                             pdf.cell(60, 5, f"  {cat}")
-                            pdf.cell(35, 5, fmt_dollar(val), align="R",
-                                     new_x="LMARGIN", new_y="NEXT")
+                            pdf.cell(35, 5, fmt_dollar(val), align="R", new_x="LMARGIN", new_y="NEXT")
                 pdf.ln(4)
 
             pdf.set_font(pdf.body_font, "B", 10)
@@ -785,9 +810,9 @@ class ReportBuilder:
             ["Operating Profit"] + q_val(lambda p: p.operating_profit),
             ["Net Profit"] + q_val(lambda p: p.net_profit),
         ]
-        pdf.draw_table(headers, rows, col_widths=cw_q,
-                       col_aligns=["L"] + ["R"] * (len(q_keys) + 1),
-                       section_label="Quarterly P&L")
+        pdf.draw_table(
+            headers, rows, col_widths=cw_q, col_aligns=["L"] + ["R"] * (len(q_keys) + 1), section_label="Quarterly P&L"
+        )
 
     def _revenue_analysis(self, pdf: ReportPDF):
         pdf.add_page()
@@ -803,8 +828,7 @@ class ReportBuilder:
             if val != 0:
                 rev_rows.append([cat, fmt_dollar(val), safe_pct(val, self.pl.total_revenue)])
         cw = [60, 35, 25]
-        pdf.draw_table(["Category", "Amount", "% of Revenue"], rev_rows,
-                       col_widths=cw, col_aligns=["L", "R", "R"])
+        pdf.draw_table(["Category", "Amount", "% of Revenue"], rev_rows, col_widths=cw, col_aligns=["L", "R", "R"])
 
     def _expense_analysis(self, pdf: ReportPDF):
         pdf.add_page()
@@ -828,9 +852,13 @@ class ReportBuilder:
         for cat, val in sorted(all_exp.items(), key=lambda x: x[1], reverse=True):
             exp_rows.append([cat, fmt_dollar(val), safe_pct(val, total_exp)])
         cw = [60, 35, 25]
-        pdf.draw_table(["Category", "Amount", "% of Total"], exp_rows,
-                       col_widths=cw, col_aligns=["L", "R", "R"],
-                       section_label="Expense Breakdown")
+        pdf.draw_table(
+            ["Category", "Amount", "% of Total"],
+            exp_rows,
+            col_widths=cw,
+            col_aligns=["L", "R", "R"],
+            section_label="Expense Breakdown",
+        )
 
     def _top_customers(self, pdf: ReportPDF):
         pdf.add_page()
@@ -848,14 +876,16 @@ class ReportBuilder:
                     source_totals[m] += tx.amount
 
         rows = []
-        for i, (name, amt) in enumerate(
-            sorted(source_totals.items(), key=lambda x: x[1], reverse=True)[:20], 1
-        ):
+        for i, (name, amt) in enumerate(sorted(source_totals.items(), key=lambda x: x[1], reverse=True)[:20], 1):
             rows.append([str(i), self._mask_text(name)[:60], fmt_dollar(amt)])
         cw = [8, 100, 35]
-        pdf.draw_table(["#", "Source", "Total"], rows,
-                       col_widths=cw, col_aligns=["R", "L", "R"],
-                       section_label="Top Income Sources")
+        pdf.draw_table(
+            ["#", "Source", "Total"],
+            rows,
+            col_widths=cw,
+            col_aligns=["R", "L", "R"],
+            section_label="Top Income Sources",
+        )
 
     def _top_vendors(self, pdf: ReportPDF):
         pdf.add_page()
@@ -873,14 +903,12 @@ class ReportBuilder:
                     vendor_totals[m] += tx.amount
 
         rows = []
-        for i, (name, amt) in enumerate(
-            sorted(vendor_totals.items(), key=lambda x: x[1], reverse=True)[:20], 1
-        ):
+        for i, (name, amt) in enumerate(sorted(vendor_totals.items(), key=lambda x: x[1], reverse=True)[:20], 1):
             rows.append([str(i), self._mask_text(name)[:60], fmt_dollar(amt)])
         cw = [8, 100, 35]
-        pdf.draw_table(["#", "Vendor", "Total"], rows,
-                       col_widths=cw, col_aligns=["R", "L", "R"],
-                       section_label="Top Vendors")
+        pdf.draw_table(
+            ["#", "Vendor", "Total"], rows, col_widths=cw, col_aligns=["R", "L", "R"], section_label="Top Vendors"
+        )
 
     def _cash_flow_analysis(self, pdf: ReportPDF):
         pdf.add_page()
@@ -893,17 +921,19 @@ class ReportBuilder:
         headers = ["Month", "Credits In", "Debits Out", "Net Cash Flow", "Ending Balance"]
         rows = []
         for s in self.statements:
-            rows.append([
-                s.month_label,
-                fmt_dollar(s.total_credits),
-                fmt_dollar(s.total_debits),
-                fmt_dollar(s.total_credits - s.total_debits),
-                fmt_dollar(s.ending_balance),
-            ])
+            rows.append(
+                [
+                    s.month_label,
+                    fmt_dollar(s.total_credits),
+                    fmt_dollar(s.total_debits),
+                    fmt_dollar(s.total_credits - s.total_debits),
+                    fmt_dollar(s.ending_balance),
+                ]
+            )
         cw = [30, 35, 35, 35, 35]
-        pdf.draw_table(headers, rows, col_widths=cw,
-                       col_aligns=["L", "R", "R", "R", "R"],
-                       section_label="Monthly Cash Flow")
+        pdf.draw_table(
+            headers, rows, col_widths=cw, col_aligns=["L", "R", "R", "R", "R"], section_label="Monthly Cash Flow"
+        )
 
     def _balance_trend(self, pdf: ReportPDF):
         pdf.add_page(orientation="L")
@@ -925,9 +955,7 @@ class ReportBuilder:
         kpi = self.kpis
 
         total_tx = sum(len(s.transactions) for s in self.statements)
-        cpa_review_count = sum(
-            1 for s in self.statements for tx in s.transactions if tx.cpa_review
-        )
+        cpa_review_count = sum(1 for s in self.statements for tx in s.transactions if tx.cpa_review)
         classified_pct = ((total_tx - cpa_review_count) / max(total_tx, 1)) * 100
         preliminary = classified_pct < 80
 
@@ -935,17 +963,19 @@ class ReportBuilder:
             pdf.set_font(pdf.body_font, "B", 8)
             pdf.set_text_color(180, 60, 60)
             pdf.multi_cell(
-                0, 4.5,
+                0,
+                4.5,
                 f"WARNING: Only {classified_pct:.0f}% of transactions are classified. "
-                f"KPIs below are based on currently classified data and may change materially."
+                f"KPIs below are based on currently classified data and may change materially.",
             )
             pdf.ln(3)
 
         margin_label = "Gross Margin*" if preliminary else "Gross Margin"
         op_margin_label = "Operating Margin*" if preliminary else "Operating Margin"
         net_margin_label = "Net Margin*" if preliminary else "Net Margin"
-        runway_label = ("Bank-Account Runway (classified expenses only)"
-                        if preliminary else "Cash Runway Estimate (months)")
+        runway_label = (
+            "Bank-Account Runway (classified expenses only)" if preliminary else "Cash Runway Estimate (months)"
+        )
         avg_rev_label = "Avg Monthly Revenue*" if preliminary else "Avg Monthly Revenue"
         avg_exp_label = "Avg Monthly Expenses*" if preliminary else "Avg Monthly Expenses"
         avg_net_label = "Avg Monthly Net Profit*" if preliminary else "Avg Monthly Net Profit"
@@ -1011,32 +1041,50 @@ class ReportBuilder:
 
         pdf.add_page(orientation="L")
         pdf.section_title(f"Projection Detail - {pr.scenario.title()} Scenario")
-        headers = ["Month", "Rev (Base)", "Exp (Base)", "Gross Profit", "Net Income",
-                   "Cash Flow", "End Cash", "Tax Reserve"]
+        headers = [
+            "Month",
+            "Rev (Base)",
+            "Exp (Base)",
+            "Gross Profit",
+            "Net Income",
+            "Cash Flow",
+            "End Cash",
+            "Tax Reserve",
+        ]
         rows = []
         for i in range(pr.months):
             label = month_labels[i] if i < len(month_labels) else f"Month {i + 1}"
-            rows.append([
-                label,
-                fmt_dollar(pr.monthly_revenue[i]),
-                fmt_dollar(pr.monthly_expenses[i]),
-                fmt_dollar(pr.monthly_gross_profit[i]),
-                fmt_dollar(pr.monthly_net_income[i]),
-                fmt_dollar(pr.monthly_cash_flow[i]),
-                fmt_dollar(pr.ending_cash[i]),
-                fmt_dollar(pr.tax_reserve[i]),
-            ])
+            rows.append(
+                [
+                    label,
+                    fmt_dollar(pr.monthly_revenue[i]),
+                    fmt_dollar(pr.monthly_expenses[i]),
+                    fmt_dollar(pr.monthly_gross_profit[i]),
+                    fmt_dollar(pr.monthly_net_income[i]),
+                    fmt_dollar(pr.monthly_cash_flow[i]),
+                    fmt_dollar(pr.ending_cash[i]),
+                    fmt_dollar(pr.tax_reserve[i]),
+                ]
+            )
         cw_p = [22, 28, 28, 28, 28, 28, 28, 28]
-        pdf.draw_table(headers, rows, col_widths=cw_p,
-                       col_aligns=["L"] + ["R"] * 7,
-                       section_label="Projection Table",
-                       header_font_size=6, row_font_size=6)
+        pdf.draw_table(
+            headers,
+            rows,
+            col_widths=cw_p,
+            col_aligns=["L"] + ["R"] * 7,
+            section_label="Projection Table",
+            header_font_size=6,
+            row_font_size=6,
+        )
 
         if len(self.projections) > 1:
             pdf.add_page(orientation="L")
             pdf.section_title("Scenario Comparison")
-            comp_headers = ["Month"] + [f"{p.scenario.title()} Rev" for p in self.projections] \
+            comp_headers = (
+                ["Month"]
+                + [f"{p.scenario.title()} Rev" for p in self.projections]
                 + [f"{p.scenario.title()} Net" for p in self.projections]
+            )
             comp_rows = []
             for i in range(pr.months):
                 label = month_labels[i] if i < len(month_labels) else f"Month {i + 1}"
@@ -1047,10 +1095,15 @@ class ReportBuilder:
                     row.append(fmt_dollar(p.monthly_net_income[i]))
                 comp_rows.append(row)
             cw_c = [20] + [32] * (len(self.projections) * 2)
-            pdf.draw_table(comp_headers, comp_rows, col_widths=cw_c,
-                           col_aligns=["L"] + ["R"] * (len(self.projections) * 2),
-                           section_label="Scenario Comparison",
-                           header_font_size=6, row_font_size=6)
+            pdf.draw_table(
+                comp_headers,
+                comp_rows,
+                col_widths=cw_c,
+                col_aligns=["L"] + ["R"] * (len(self.projections) * 2),
+                section_label="Scenario Comparison",
+                header_font_size=6,
+                row_font_size=6,
+            )
 
     def _projection_assumptions(self, pdf: ReportPDF):
         pdf.add_page()
@@ -1067,9 +1120,7 @@ class ReportBuilder:
             for k, v in pr.assumptions.items():
                 if k == "min_cash_warnings":
                     if v:
-                        pdf.body_text_small(
-                            f"WARNING: Minimum cash balance breached in projected months: {v}"
-                        )
+                        pdf.body_text_small(f"WARNING: Minimum cash balance breached in projected months: {v}")
                     continue
                 pdf.body_text_small(f"{k}: {v}")
         pdf.body_text_small(
@@ -1084,9 +1135,7 @@ class ReportBuilder:
         pdf.add_page()
         pdf.section_title("Transaction Detail")
         if self.full_detail:
-            pdf.body_text_small(
-                f"Complete transaction listing for all {len(self.statements)} months."
-            )
+            pdf.body_text_small(f"Complete transaction listing for all {len(self.statements)} months.")
         else:
             pdf.body_text_small(
                 "Transaction detail excerpt \u2014 up to 50 transactions per statement. "
@@ -1097,27 +1146,33 @@ class ReportBuilder:
             pdf.add_page()
             pdf.section_title(f"Transaction Detail - {stmt.month_label}")
 
-            sorted_tx = sorted(
-                stmt.transactions,
-                key=lambda tx: tx.post_date,
-                reverse=True,
-            )[:50] if not self.full_detail else sorted(
-                stmt.transactions,
-                key=lambda tx: tx.post_date,
-                reverse=True,
+            sorted_tx = (
+                sorted(
+                    stmt.transactions,
+                    key=lambda tx: tx.post_date,
+                    reverse=True,
+                )[:50]
+                if not self.full_detail
+                else sorted(
+                    stmt.transactions,
+                    key=lambda tx: tx.post_date,
+                    reverse=True,
+                )
             )
             tx_rows = []
             for tx in sorted_tx:
                 desc = self._mask_text(tx.description)[:50]
                 sign = "+" if tx.is_credit else "-"
-                tx_rows.append([
-                    tx.post_date,
-                    desc,
-                    tx.business_category[:18],
-                    f"{sign}{fmt_dollar(tx.amount)}",
-                    fmt_dollar(tx.balance),
-                    "Yes" if tx.cpa_review else "",
-                ])
+                tx_rows.append(
+                    [
+                        tx.post_date,
+                        desc,
+                        tx.business_category[:18],
+                        f"{sign}{fmt_dollar(tx.amount)}",
+                        fmt_dollar(tx.balance),
+                        "Yes" if tx.cpa_review else "",
+                    ]
+                )
             cw_tx = [22, 55, 28, 26, 26, 12]
             pdf.draw_table(
                 ["Date", "Description", "Category", "Amount", "Balance", "Review"],
@@ -1186,9 +1241,10 @@ class ReportBuilder:
             ("Source Statements", str(len(self.statements))),
             ("First Statement", self.statements[0].month_label if self.statements else "N/A"),
             ("Last Statement", self.statements[-1].month_label if self.statements else "N/A"),
-            ("Reconciliation Status",
-             "PASSED" if self.all_reconciled
-             else ("FORCED" if self.forced_generation else "FAILED")),
+            (
+                "Reconciliation Status",
+                "PASSED" if self.all_reconciled else ("FORCED" if self.forced_generation else "FAILED"),
+            ),
             ("Script Version", _SCRIPT_HASH),
         ]
         pdf.draw_kv_table(rows)
@@ -1200,9 +1256,7 @@ class ReportBuilder:
         pl = self.pl
 
         total_tx = sum(len(s.transactions) for s in self.statements)
-        cpa_review_count = sum(
-            1 for s in self.statements for tx in s.transactions if tx.cpa_review
-        )
+        cpa_review_count = sum(1 for s in self.statements for tx in s.transactions if tx.cpa_review)
         classification_pct = (cpa_review_count / max(total_tx, 1)) * 100
         partial_year = len(self.statements) < 12
         classification_low = classification_pct > 50 or partial_year
@@ -1232,10 +1286,13 @@ class ReportBuilder:
             reserve_label = f"Tax reserve withheld \u2014 {'; '.join(reasons)}"
             reserve_val = Decimal("0")
         else:
-            reserve_pct = Decimal(str(
-                self.config.projection_config.get("tax_reserve_pct", 0.25)
-                if self.config.projection_config else 0.25
-            ))
+            reserve_pct = Decimal(
+                str(
+                    self.config.projection_config.get("tax_reserve_pct", 0.25)
+                    if self.config.projection_config
+                    else 0.25
+                )
+            )
             reserve_label = f"Estimated Tax Reserve ({float(reserve_pct) * 100:.0f}%)"
             reserve_val = pl.net_profit * reserve_pct
 
@@ -1270,12 +1327,8 @@ class ReportBuilder:
 
         pdf.add_page()
         pdf.section_title("Cash-to-P&L Reconciliation")
-        pdf.body_text_small(
-            "How the preliminary P&L result bridges to the net bank-account change."
-        )
-        cpa_review_count = sum(
-            1 for s in self.statements for tx in s.transactions if tx.cpa_review
-        )
+        pdf.body_text_small("How the preliminary P&L result bridges to the net bank-account change.")
+        cpa_review_count = sum(1 for s in self.statements for tx in s.transactions if tx.cpa_review)
         pdf.body_text_small(
             f"Note: {cpa_review_count} transactions remain unclassified; "
             f"the bridge below may change after classification."
@@ -1289,18 +1342,33 @@ class ReportBuilder:
             ("+ Owner Contributions", fmt_dollar(pl.owner_contributions)),
             ("- Owner Distributions / Draws", fmt_dollar(-pl.owner_distributions)),
             ("- Fixed Asset Purchases", fmt_dollar(-pl.fixed_asset_purchases)),
-            ("+ Net Account Transfers",
-             fmt_dollar(pl.account_transfers_credits - pl.account_transfers_debits - pl.credit_card_transfers)),
-            ("+ Net Unclassified Activity",
-             fmt_dollar(pl.uncategorized_non_pnl_credits - pl.uncategorized_non_pnl_debits)),
+            (
+                "+ Net Account Transfers",
+                fmt_dollar(pl.account_transfers_credits - pl.account_transfers_debits - pl.credit_card_transfers),
+            ),
+            (
+                "+ Net Unclassified Activity",
+                fmt_dollar(pl.uncategorized_non_pnl_credits - pl.uncategorized_non_pnl_debits),
+            ),
             ("", ""),
-            ("= Estimated Net Cash Change",
-             fmt_dollar(pl.net_profit + pl.payment_reversal_credits - pl.payment_reversal_debits + pl.loan_proceeds
-                        - pl.loan_principal_payments + pl.owner_contributions
-                        - pl.owner_distributions - pl.fixed_asset_purchases
-                        + pl.account_transfers_credits - pl.account_transfers_debits
-                        - pl.credit_card_transfers
-                        + pl.uncategorized_non_pnl_credits - pl.uncategorized_non_pnl_debits)),
+            (
+                "= Estimated Net Cash Change",
+                fmt_dollar(
+                    pl.net_profit
+                    + pl.payment_reversal_credits
+                    - pl.payment_reversal_debits
+                    + pl.loan_proceeds
+                    - pl.loan_principal_payments
+                    + pl.owner_contributions
+                    - pl.owner_distributions
+                    - pl.fixed_asset_purchases
+                    + pl.account_transfers_credits
+                    - pl.account_transfers_debits
+                    - pl.credit_card_transfers
+                    + pl.uncategorized_non_pnl_credits
+                    - pl.uncategorized_non_pnl_debits
+                ),
+            ),
         ]
         pdf.draw_kv_table(bridge_rows)
 
@@ -1309,13 +1377,12 @@ class ReportBuilder:
         pdf.section_title("Page 3: Expense Summary by Tax Category")
         if self.config.entity_type in ("sole-prop", "single-member-llc"):
             pdf.body_text_small(
-                "Suggested Schedule C organizational aid. "
-                "Verify all classifications with a tax professional."
+                "Suggested Schedule C organizational aid. Verify all classifications with a tax professional."
             )
         else:
             pdf.body_text_small("Tax preparation categories. Verify all classifications with a tax professional.")
 
-        tax_groups: dict[str, dict[str, object]] = {}
+        tax_groups: dict[str, _TaxGroup] = {}
         for s in self.statements:
             for tx in s.transactions:
                 if tx.is_credit or tx.is_transfer:
@@ -1324,32 +1391,36 @@ class ReportBuilder:
                     continue
                 if tx.is_loan and not tx.include_in_pnl:
                     continue
-                key = tx.tax_category
-                if key not in tax_groups:
-                    tax_groups[key] = {"count": 0, "total": Decimal("0"), "cats": set(), "review": False}
-                tax_groups[key]["count"] += 1
-                tax_groups[key]["total"] += tx.amount
-                tax_groups[key]["cats"].add(tx.business_category)
+                group = tax_groups.setdefault(tx.tax_category, _TaxGroup())
+                group.count += 1
+                group.total += tx.amount
+                group.cats.add(tx.business_category)
                 if tx.cpa_review:
-                    tax_groups[key]["review"] = True
+                    group.review = True
 
         pdf.sub_title("Potential Deductible Expenses")
         headers = ["Tax Category", "Business Categories", "Count", "Amount", "Deductibility", "Review"]
         rows = []
         for tcat, info in sorted(tax_groups.items()):
-            rows.append([
-                tcat,
-                ", ".join(sorted(info["cats"]))[:60],
-                str(info["count"]),
-                fmt_dollar(info["total"]),
-                "Review needed" if info["review"] else "Suggested",
-                "Yes" if info["review"] else "No",
-            ])
+            rows.append(
+                [
+                    tcat,
+                    ", ".join(sorted(info.cats))[:60],
+                    str(info.count),
+                    fmt_dollar(info.total),
+                    "Review needed" if info.review else "Suggested",
+                    "Yes" if info.review else "No",
+                ]
+            )
         cw = [35, 55, 12, 30, 30, 14]
         if rows:
-            pdf.draw_table(headers, rows, col_widths=cw,
-                           col_aligns=["L", "L", "R", "R", "L", "C"],
-                           section_label="Tax Category Summary")
+            pdf.draw_table(
+                headers,
+                rows,
+                col_widths=cw,
+                col_aligns=["L", "L", "R", "R", "L", "C"],
+                section_label="Tax Category Summary",
+            )
         else:
             pdf.body_text_small("No deductible expenses categorized.")
 
@@ -1366,36 +1437,41 @@ class ReportBuilder:
         pdf.add_page()
         pdf.section_title("Page 4: Revenue Detail")
         pdf.sub_title("Revenue by Category")
-        rev_rows = [[cat, fmt_dollar(val)]
-                    for cat, val in sorted(self.pl.revenue.items(),
-                                           key=lambda x: x[1], reverse=True)
-                    if val != 0]
+        rev_rows = [
+            [cat, fmt_dollar(val)]
+            for cat, val in sorted(self.pl.revenue.items(), key=lambda x: x[1], reverse=True)
+            if val != 0
+        ]
         if rev_rows:
-            pdf.draw_table(["Category", "Amount"], rev_rows,
-                           col_widths=[70, 40], col_aligns=["L", "R"])
+            pdf.draw_table(["Category", "Amount"], rev_rows, col_widths=[70, 40], col_aligns=["L", "R"])
         else:
             pdf.body_text_small("No revenue categorized.")
 
         pdf.sub_title("Unusual or Large Deposits")
         large_dep = sorted(
-            [tx for s in self.statements for tx in s.transactions
-             if tx.is_credit and tx.amount >= Decimal("1000")],
-            key=lambda tx: tx.amount, reverse=True,
+            [tx for s in self.statements for tx in s.transactions if tx.is_credit and tx.amount >= Decimal("1000")],
+            key=lambda tx: tx.amount,
+            reverse=True,
         )[:20]
         if large_dep:
-            l_rows = [[tx.post_date, self._mask_text(tx.description)[:50],
-                       fmt_dollar(tx.amount), tx.business_category]
-                      for tx in large_dep]
-            pdf.draw_table(["Date", "Description", "Amount", "Category"], l_rows,
-                           col_widths=[22, 70, 30, 35],
-                           col_aligns=["L", "L", "R", "L"],
-                           section_label="Large Deposits")
+            l_rows = [
+                [tx.post_date, self._mask_text(tx.description)[:50], fmt_dollar(tx.amount), tx.business_category]
+                for tx in large_dep
+            ]
+            pdf.draw_table(
+                ["Date", "Description", "Amount", "Category"],
+                l_rows,
+                col_widths=[22, 70, 30, 35],
+                col_aligns=["L", "L", "R", "L"],
+                section_label="Large Deposits",
+            )
         else:
             pdf.body_text_small("No large deposits detected.")
 
         has_factoring_like = any(
             "APEX" in tx.description.upper() or "FACTOR" in tx.description.upper()
-            for s in self.statements for tx in s.transactions
+            for s in self.statements
+            for tx in s.transactions
             if tx.is_credit
         )
         if has_factoring_like:
@@ -1403,18 +1479,21 @@ class ReportBuilder:
             pdf.set_font(pdf.body_font, "B", 8)
             pdf.set_text_color(180, 120, 40)
             pdf.multi_cell(
-                0, 4.5,
+                0,
+                4.5,
                 "Note: Incoming wires from factoring or settlement companies may "
                 "represent net funding rather than gross revenue. Factoring fees, "
                 "reserve withholdings, releases, chargebacks, and adjustments should "
-                "be reconciled against settlement reports before final tax filing."
+                "be reconciled against settlement reports before final tax filing.",
             )
 
     def _cpa_deduction_detail(self, pdf: ReportPDF):
         pdf.add_page()
         pdf.section_title("Page 5: Potential Deduction Detail")
         candidates = [
-            tx for s in self.statements for tx in s.transactions
+            tx
+            for s in self.statements
+            for tx in s.transactions
             if not tx.is_credit and tx.include_in_pnl and tx.amount > 0
         ]
         candidates.sort(key=lambda tx: tx.amount, reverse=True)
@@ -1422,21 +1501,28 @@ class ReportBuilder:
         headers = ["Date", "Vendor", "Description", "Category", "Tax Cat", "Amount", "Deduct", "Review"]
         rows = []
         for tx in candidates[:100]:
-            rows.append([
-                tx.post_date,
-                self.redactor.merchant(normalize_merchant(tx.description))[:25],
-                self._mask_text(tx.description)[:35],
-                tx.business_category[:18],
-                tx.tax_category[:18],
-                fmt_dollar(tx.amount),
-                tx.deductibility[:12],
-                tx.review_reason[:30] if tx.cpa_review else "",
-            ])
+            rows.append(
+                [
+                    tx.post_date,
+                    self.redactor.merchant(normalize_merchant(tx.description))[:25],
+                    self._mask_text(tx.description)[:35],
+                    tx.business_category[:18],
+                    tx.tax_category[:18],
+                    fmt_dollar(tx.amount),
+                    tx.deductibility[:12],
+                    tx.review_reason[:30] if tx.cpa_review else "",
+                ]
+            )
         cw = [20, 28, 38, 22, 22, 24, 18, 30]
-        pdf.draw_table(headers, rows, col_widths=cw,
-                       col_aligns=["L", "L", "L", "L", "L", "R", "L", "L"],
-                       section_label="Potential Deductions",
-                       header_font_size=5.5, row_font_size=5.5)
+        pdf.draw_table(
+            headers,
+            rows,
+            col_widths=cw,
+            col_aligns=["L", "L", "L", "L", "L", "R", "L", "L"],
+            section_label="Potential Deductions",
+            header_font_size=5.5,
+            row_font_size=5.5,
+        )
 
     def _cpa_fixed_assets(self, pdf: ReportPDF):
         pdf.add_page()
@@ -1460,17 +1546,23 @@ class ReportBuilder:
             pdf.sub_title("Likely Fixed-Asset Candidates")
             lik_rows = []
             for tx in likely[:30]:
-                lik_rows.append([
-                    tx.post_date,
-                    self.redactor.merchant(normalize_merchant(tx.description))[:25],
-                    self._mask_text(tx.description)[:35],
-                    fmt_dollar(tx.amount),
-                    "Review needed",
-                    "Flagged by category rule - verify asset treatment",
-                ])
-            pdf.draw_table(headers, lik_rows, col_widths=cw,
-                           col_aligns=["L", "L", "L", "R", "L", "L"],
-                           section_label="Fixed Asset Candidates")
+                lik_rows.append(
+                    [
+                        tx.post_date,
+                        self.redactor.merchant(normalize_merchant(tx.description))[:25],
+                        self._mask_text(tx.description)[:35],
+                        fmt_dollar(tx.amount),
+                        "Review needed",
+                        "Flagged by category rule - verify asset treatment",
+                    ]
+                )
+            pdf.draw_table(
+                headers,
+                lik_rows,
+                col_widths=cw,
+                col_aligns=["L", "L", "L", "R", "L", "L"],
+                section_label="Fixed Asset Candidates",
+            )
 
         if other:
             pdf.sub_title("Other Large Transactions \u2014 Not Suggested as Assets")
@@ -1501,17 +1593,23 @@ class ReportBuilder:
                 else:
                     reason = "Unidentified \u2014 CPA review"
                 note = "CPA review" if tx.amount >= Decimal("2500") else "Review"
-                oth_rows.append([
-                    tx.post_date,
-                    self.redactor.merchant(normalize_merchant(tx.description))[:25],
-                    self._mask_text(tx.description)[:35],
-                    fmt_dollar(tx.amount),
-                    reason,
-                    note,
-                ])
-            pdf.draw_table(oth_headers, oth_rows, col_widths=cw,
-                           col_aligns=["L", "L", "L", "R", "L", "L"],
-                           section_label="Other Large Transactions")
+                oth_rows.append(
+                    [
+                        tx.post_date,
+                        self.redactor.merchant(normalize_merchant(tx.description))[:25],
+                        self._mask_text(tx.description)[:35],
+                        fmt_dollar(tx.amount),
+                        reason,
+                        note,
+                    ]
+                )
+            pdf.draw_table(
+                oth_headers,
+                oth_rows,
+                col_widths=cw,
+                col_aligns=["L", "L", "L", "R", "L", "L"],
+                section_label="Other Large Transactions",
+            )
 
         if not likely and not other:
             pdf.body_text_small("No fixed-asset or large purchase candidates detected.")
@@ -1533,11 +1631,9 @@ class ReportBuilder:
 
         total_vehicle = sum(vehicle_cats.values(), Decimal("0"))
         if total_vehicle > 0:
-            rows = [[cat, fmt_dollar(val)] for cat, val in sorted(vehicle_cats.items())
-                    if val > 0]
+            rows = [[cat, fmt_dollar(val)] for cat, val in sorted(vehicle_cats.items()) if val > 0]
             rows.append(["Total Vehicle Costs", fmt_dollar(total_vehicle)])
-            pdf.draw_table(["Category", "Amount"], rows, col_widths=[70, 40],
-                           col_aligns=["L", "R"])
+            pdf.draw_table(["Category", "Amount"], rows, col_widths=[70, 40], col_aligns=["L", "R"])
         else:
             pdf.body_text_small("No vehicle-related costs detected.")
 
@@ -1558,9 +1654,12 @@ class ReportBuilder:
         )
 
         payroll_tx = [
-            tx for s in self.statements for tx in s.transactions
-            if not tx.is_credit and tx.business_category in
-            ("Payroll", "Payroll Taxes", "Employee Benefits", "Contract Labor", "Subcontractors")
+            tx
+            for s in self.statements
+            for tx in s.transactions
+            if not tx.is_credit
+            and tx.business_category
+            in ("Payroll", "Payroll Taxes", "Employee Benefits", "Contract Labor", "Subcontractors")
         ]
         headers = ["Date", "Description", "Category", "Amount", "Review Note"]
         rows = []
@@ -1568,18 +1667,20 @@ class ReportBuilder:
             note = ""
             if tx.business_category in ("Contract Labor", "Subcontractors"):
                 note = "Verify worker classification / 1099 requirement"
-            rows.append([
-                tx.post_date,
-                self._mask_text(tx.description)[:45],
-                tx.business_category,
-                fmt_dollar(tx.amount),
-                note,
-            ])
+            rows.append(
+                [
+                    tx.post_date,
+                    self._mask_text(tx.description)[:45],
+                    tx.business_category,
+                    fmt_dollar(tx.amount),
+                    note,
+                ]
+            )
         cw = [20, 50, 25, 25, 50]
         if rows:
-            pdf.draw_table(headers, rows, col_widths=cw,
-                           col_aligns=["L", "L", "L", "R", "L"],
-                           section_label="Payroll & Contractor")
+            pdf.draw_table(
+                headers, rows, col_widths=cw, col_aligns=["L", "L", "L", "R", "L"], section_label="Payroll & Contractor"
+            )
         else:
             pdf.body_text_small("No payroll or contractor payments categorized.")
 
@@ -1587,10 +1688,13 @@ class ReportBuilder:
         pdf.add_page()
         pdf.section_title("Page 9: Loans, Interest, and Financing")
         loan_tx = [
-            tx for s in self.statements for tx in s.transactions
-            if tx.is_loan or "LOAN" in tx.description.upper() or
-            tx.business_category in ("Loan Proceeds", "Loan Principal Payment", "Loan Interest",
-                                     "Credit Card Payment")
+            tx
+            for s in self.statements
+            for tx in s.transactions
+            if tx.is_loan
+            or "LOAN" in tx.description.upper()
+            or tx.business_category
+            in ("Loan Proceeds", "Loan Principal Payment", "Loan Interest", "Credit Card Payment")
         ]
         headers = ["Date", "Description", "Category", "Amount", "Type", "Note"]
         rows = []
@@ -1607,19 +1711,21 @@ class ReportBuilder:
             else:
                 typ = "Payment"
             note = "May include interest - verify with loan statement"
-            rows.append([
-                tx.post_date,
-                self._mask_text(tx.description)[:45],
-                tx.business_category,
-                fmt_dollar(tx.amount),
-                typ,
-                note,
-            ])
+            rows.append(
+                [
+                    tx.post_date,
+                    self._mask_text(tx.description)[:45],
+                    tx.business_category,
+                    fmt_dollar(tx.amount),
+                    typ,
+                    note,
+                ]
+            )
         cw = [20, 50, 25, 25, 20, 40]
         if rows:
-            pdf.draw_table(headers, rows, col_widths=cw,
-                           col_aligns=["L", "L", "L", "R", "L", "L"],
-                           section_label="Loan Activity")
+            pdf.draw_table(
+                headers, rows, col_widths=cw, col_aligns=["L", "L", "L", "R", "L", "L"], section_label="Loan Activity"
+            )
             pdf.body_text_small(
                 "WARNING: Never classify an entire loan payment as an expense "
                 "when principal and interest cannot be separated. Obtain loan "
@@ -1632,26 +1738,29 @@ class ReportBuilder:
         pdf.add_page()
         pdf.section_title("Page 10: Owner and Related-Party Activity")
         owner_tx = [
-            tx for s in self.statements for tx in s.transactions
-            if tx.is_owner_related or
-            tx.business_category in ("Owner Contribution", "Owner Draw or Distribution")
+            tx
+            for s in self.statements
+            for tx in s.transactions
+            if tx.is_owner_related or tx.business_category in ("Owner Contribution", "Owner Draw or Distribution")
         ]
         headers = ["Date", "Description", "Category", "Amount", "Type"]
         rows = []
         for tx in sorted(owner_tx, key=lambda tx: tx.post_date, reverse=True)[:50]:
             typ = "Contribution" if tx.is_credit else "Draw/Distribution"
-            rows.append([
-                tx.post_date,
-                self._mask_text(tx.description)[:50],
-                tx.business_category,
-                fmt_dollar(tx.amount),
-                typ,
-            ])
+            rows.append(
+                [
+                    tx.post_date,
+                    self._mask_text(tx.description)[:50],
+                    tx.business_category,
+                    fmt_dollar(tx.amount),
+                    typ,
+                ]
+            )
         cw = [20, 55, 30, 30, 30]
         if rows:
-            pdf.draw_table(headers, rows, col_widths=cw,
-                           col_aligns=["L", "L", "L", "R", "L"],
-                           section_label="Owner Activity")
+            pdf.draw_table(
+                headers, rows, col_widths=cw, col_aligns=["L", "L", "L", "R", "L"], section_label="Owner Activity"
+            )
         else:
             pdf.body_text_small("No owner-related transactions detected.")
         pdf.body_text_small(
@@ -1664,25 +1773,28 @@ class ReportBuilder:
         pdf.add_page()
         pdf.section_title("Page 11: Taxes and Government Payments")
         tax_tx = [
-            tx for s in self.statements for tx in s.transactions
-            if tx.business_category in ("Tax Payment", "Taxes and Fees",
-                                        "Payroll Taxes", "Licenses and Permits")
+            tx
+            for s in self.statements
+            for tx in s.transactions
+            if tx.business_category in ("Tax Payment", "Taxes and Fees", "Payroll Taxes", "Licenses and Permits")
             or "TAX" in tx.description.upper()
         ]
         headers = ["Date", "Description", "Category", "Amount"]
         rows = []
         for tx in sorted(tax_tx, key=lambda tx: tx.post_date, reverse=True)[:50]:
-            rows.append([
-                tx.post_date,
-                self._mask_text(tx.description)[:60],
-                tx.business_category,
-                fmt_dollar(tx.amount),
-            ])
+            rows.append(
+                [
+                    tx.post_date,
+                    self._mask_text(tx.description)[:60],
+                    tx.business_category,
+                    fmt_dollar(tx.amount),
+                ]
+            )
         cw = [22, 70, 30, 30]
         if rows:
-            pdf.draw_table(headers, rows, col_widths=cw,
-                           col_aligns=["L", "L", "L", "R"],
-                           section_label="Tax & Government Payments")
+            pdf.draw_table(
+                headers, rows, col_widths=cw, col_aligns=["L", "L", "L", "R"], section_label="Tax & Government Payments"
+            )
             pdf.body_text_small(
                 "IMPORTANT: Owner income-tax payments should NOT be automatically "
                 "treated as business operating expenses. Verify each payment."
@@ -1694,7 +1806,9 @@ class ReportBuilder:
         pdf.add_page()
         pdf.section_title("Page 12: Uncategorized and Review Transactions")
         review_tx = [
-            tx for s in self.statements for tx in s.transactions
+            tx
+            for s in self.statements
+            for tx in s.transactions
             if tx.cpa_review or tx.business_category in ("Uncategorized", "CPA Review Required")
         ]
         if not review_tx:
@@ -1702,24 +1816,30 @@ class ReportBuilder:
             return
 
         pdf.body_text_small(
-            f"{len(review_tx)} transaction(s) require CPA review. "
-            "Do not truncate - all are listed below."
+            f"{len(review_tx)} transaction(s) require CPA review. Do not truncate - all are listed below."
         )
         headers = ["Date", "Description", "Amount", "Type", "Review Reason"]
         rows = []
         for tx in sorted(review_tx, key=lambda tx: tx.post_date, reverse=True):
-            rows.append([
-                tx.post_date,
-                self._mask_text(tx.description)[:55],
-                fmt_dollar(tx.amount),
-                "Credit" if tx.is_credit else "Debit",
-                tx.review_reason or "Uncategorized",
-            ])
+            rows.append(
+                [
+                    tx.post_date,
+                    self._mask_text(tx.description)[:55],
+                    fmt_dollar(tx.amount),
+                    "Credit" if tx.is_credit else "Debit",
+                    tx.review_reason or "Uncategorized",
+                ]
+            )
         cw = [20, 65, 25, 16, 50]
-        pdf.draw_table(headers, rows, col_widths=cw,
-                       col_aligns=["L", "L", "R", "L", "L"],
-                       section_label="CPA Review Transactions",
-                       header_font_size=6, row_font_size=5.5)
+        pdf.draw_table(
+            headers,
+            rows,
+            col_widths=cw,
+            col_aligns=["L", "L", "R", "L", "L"],
+            section_label="CPA Review Transactions",
+            header_font_size=6,
+            row_font_size=5.5,
+        )
 
     def _cpa_reconciliation(self, pdf: ReportPDF):
         pdf.add_page()
@@ -1743,16 +1863,16 @@ class ReportBuilder:
                 expected = date(prev.year, prev.month, 1) + timedelta(days=32)
                 expected = date(expected.year, expected.month, 1)
                 if date(curr.year, curr.month, 1) != expected:
-                    rows.append([
-                        f"Gap: {prev.strftime('%b %Y')} -> {curr.strftime('%b %Y')}",
-                        "GAP",
-                        "Missing statement(s) detected",
-                    ])
+                    rows.append(
+                        [
+                            f"Gap: {prev.strftime('%b %Y')} -> {curr.strftime('%b %Y')}",
+                            "GAP",
+                            "Missing statement(s) detected",
+                        ]
+                    )
 
         cw = [45, 14, 110]
-        pdf.draw_table(headers, rows, col_widths=cw,
-                       col_aligns=["L", "C", "L"],
-                       section_label="Reconciliation Detail")
+        pdf.draw_table(headers, rows, col_widths=cw, col_aligns=["L", "C", "L"], section_label="Reconciliation Detail")
 
         pdf.sub_title("Key Assumptions")
         pdf.body_text_small(
@@ -1779,8 +1899,7 @@ class ReportBuilder:
 
         if uncat_deposits > 0:
             questions.append(
-                f"Which of the {uncat_deposits} unidentified deposits are "
-                f"loans, transfers, contributions, or revenue?"
+                f"Which of the {uncat_deposits} unidentified deposits are loans, transfers, contributions, or revenue?"
             )
         if uncat_debits > 0:
             questions.append(f"Which of the {uncat_debits} uncategorized expense transactions need reclassification?")
@@ -1793,19 +1912,21 @@ class ReportBuilder:
         if large_purchases > 0:
             questions.append(f"Which of the {large_purchases} purchases over $500 were fixed assets?")
 
-        questions.extend([
-            "Were any business expenses paid from personal accounts?",
-            "Were any business revenues deposited into other accounts?",
-            "Are mileage logs available for vehicle deductions?",
-            "Are payroll reports and quarterly filings available?",
-            "Are contractor W-9 forms available for 1099 preparation?",
-            "Are business credit-card statements available?",
-            "Are loan statements available for interest/principal breakdown?",
-            "Are sales-tax records and filings available?",
-            "Are there omitted accounts receivable or payable?",
-            "Were any estimated tax payments made outside this account?",
-            "Are there home-office or other deductible personal expenses?",
-        ])
+        questions.extend(
+            [
+                "Were any business expenses paid from personal accounts?",
+                "Were any business revenues deposited into other accounts?",
+                "Are mileage logs available for vehicle deductions?",
+                "Are payroll reports and quarterly filings available?",
+                "Are contractor W-9 forms available for 1099 preparation?",
+                "Are business credit-card statements available?",
+                "Are loan statements available for interest/principal breakdown?",
+                "Are sales-tax records and filings available?",
+                "Are there omitted accounts receivable or payable?",
+                "Were any estimated tax payments made outside this account?",
+                "Are there home-office or other deductible personal expenses?",
+            ]
+        )
 
         for i, q in enumerate(questions, 1):
             pdf.set_font(pdf.body_font, "", 9)
@@ -1885,9 +2006,7 @@ class ReportBuilder:
             status_display = status_labels.get(status_raw, f"[ ] {status_raw}")
             rows.append([label, status_display])
         cw = [120, 45]
-        pdf.draw_table(headers, rows, col_widths=cw,
-                       col_aligns=["L", "L"],
-                       section_label="Document Checklist")
+        pdf.draw_table(headers, rows, col_widths=cw, col_aligns=["L", "L"], section_label="Document Checklist")
 
     def _cpa_certification(self, pdf: ReportPDF):
         pdf.add_page()
@@ -1930,10 +2049,10 @@ class ReportBuilder:
 
         pdf.set_font(pdf.body_font, "", 9)
         pdf.set_text_color(50, 50, 50)
-        pdf.cell(0, 8, "Business Owner Signature: ________________________  Date: ________",
-                 new_x="LMARGIN", new_y="NEXT")
-        pdf.cell(0, 8, "Preparer Signature:    ________________________  Date: ________",
-                 new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(
+            0, 8, "Business Owner Signature: ________________________  Date: ________", new_x="LMARGIN", new_y="NEXT"
+        )
+        pdf.cell(0, 8, "Preparer Signature:    ________________________  Date: ________", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(4)
         pdf.body_text_small(
             "By signing, the parties acknowledge review of the report contents. "
@@ -1975,14 +2094,14 @@ def build_report(
         fys = config.fiscal_year_start
         fy = target_year if target_year else statements[0].year
         q_start, q_end = fiscal_quarter_range(fy, target_quarter, fys)
-        statements = [
-            s for s in statements
-            if s.date_obj >= q_start and s.date_obj <= q_end
-        ]
+        statements = [s for s in statements if s.date_obj >= q_start and s.date_obj <= q_end]
         if target_year:
             logger.info(
                 "Fiscal quarter: FY%d Q%d (%s – %s)",
-                fy, target_quarter, q_start, q_end,
+                fy,
+                target_quarter,
+                q_start,
+                q_end,
             )
     else:
         if target_year:
@@ -1998,16 +2117,14 @@ def build_report(
 
     report_statements = statements
     if start_date_str or end_date_str:
-        sd = (datetime.strptime(start_date_str, "%Y-%m-%d").date()
-              if start_date_str else None)
-        ed = (datetime.strptime(end_date_str, "%Y-%m-%d").date()
-              if end_date_str else None)
+        sd = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str else None
+        ed = datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str else None
         filtered_stmts: list[Statement] = []
         for stmt in statements:
             filtered_tx = [
-                tx for tx in stmt.transactions
-                if (sd is None or tx.date_obj >= sd)
-                and (ed is None or tx.date_obj <= ed)
+                tx
+                for tx in stmt.transactions
+                if (sd is None or tx.date_obj >= sd) and (ed is None or tx.date_obj <= ed)
             ]
             if filtered_tx:
                 period_credits = sum(
@@ -2036,20 +2153,22 @@ def build_report(
                         continue
                     if (sd is None or parsed >= sd) and (ed is None or parsed <= ed):
                         period_daily.append(entry)
-                filtered_stmts.append(Statement(
-                    statement_date=stmt.statement_date,
-                    account_number=stmt.account_number,
-                    beginning_balance=period_start_balance,
-                    ending_balance=period_end_balance,
-                    total_credits=period_credits,
-                    total_debits=period_debits,
-                    credit_count=period_credit_count,
-                    debit_count=period_debit_count,
-                    transactions=sorted_tx,
-                    checks_cleared=stmt.checks_cleared,
-                    daily_balances=period_daily,
-                    file_path=stmt.file_path,
-                ))
+                filtered_stmts.append(
+                    Statement(
+                        statement_date=stmt.statement_date,
+                        account_number=stmt.account_number,
+                        beginning_balance=period_start_balance,
+                        ending_balance=period_end_balance,
+                        total_credits=period_credits,
+                        total_debits=period_debits,
+                        credit_count=period_credit_count,
+                        debit_count=period_debit_count,
+                        transactions=sorted_tx,
+                        checks_cleared=stmt.checks_cleared,
+                        daily_balances=period_daily,
+                        file_path=stmt.file_path,
+                    )
+                )
         if not filtered_stmts:
             logger.error(
                 "No transactions found between %s and %s.",
@@ -2066,7 +2185,8 @@ def build_report(
     categorizer.mark_credit_deposits(statements)
 
     recon_results, all_reconciled, forced_generation = reconcile_all(
-        statements, allow_mismatch=allow_mismatch,
+        statements,
+        allow_mismatch=allow_mismatch,
     )
     if forced_generation:
         logger.warning(
@@ -2075,16 +2195,12 @@ def build_report(
             sum(1 for r in recon_results if not r.passed),
         )
     elif not all_reconciled and not allow_mismatch:
-        logger.error(
-            "Reconciliation failed. Use --allow-mismatch to force report generation."
-        )
+        logger.error("Reconciliation failed. Use --allow-mismatch to force report generation.")
         for rr in recon_results:
             if not rr.passed:
                 for w in rr.warnings:
                     logger.error("  %s: %s", rr.statement_label, w)
-        raise ReconciliationError(
-            "Reconciliation failed. Use --allow-mismatch to force report generation."
-        )
+        raise ReconciliationError("Reconciliation failed. Use --allow-mismatch to force report generation.")
 
     pl = build_pl(
         [tx for s in report_statements for tx in s.transactions],
@@ -2098,24 +2214,20 @@ def build_report(
     projection_status = "not_requested"
     if do_projections:
         projection_status = "requested"
-        cpa_review_count = sum(
-            1 for s in report_statements for tx in s.transactions if tx.cpa_review
-        )
+        cpa_review_count = sum(1 for s in report_statements for tx in s.transactions if tx.cpa_review)
         total_rev = sum((monthly_pls[k].total_revenue for k in sorted(monthly_pls.keys())), Decimal("0"))
         if total_rev == 0 or cpa_review_count > len(report_statements) * 5:
             projection_status = "withheld"
             logger.info(
                 "Projections withheld: $%.2f classified revenue, %d transactions unclassified.",
-                total_rev, cpa_review_count,
+                total_rev,
+                cpa_review_count,
             )
         else:
             pconfig = config.projection_config or {}
             engine = ProjectionEngine(pconfig)
             hist_rev = [monthly_pls[k].total_revenue for k in sorted(monthly_pls.keys())]
-            hist_exp = [
-                monthly_pls[k].total_operating_expenses
-                for k in sorted(monthly_pls.keys())
-            ]
+            hist_exp = [monthly_pls[k].total_operating_expenses for k in sorted(monthly_pls.keys())]
             starting_cash = report_statements[-1].ending_balance if report_statements else Decimal("0")
 
             last_stmt = report_statements[-1] if report_statements else None
@@ -2127,20 +2239,26 @@ def build_report(
                 proj_start = None
 
             if scenario and scenario != "all":
-                projections = [engine.project_selected(
-                    hist_rev, hist_exp, starting_cash, scenario, proj_start,
-                )]
+                projections = [
+                    engine.project_selected(
+                        hist_rev,
+                        hist_exp,
+                        starting_cash,
+                        scenario,
+                        proj_start,
+                    )
+                ]
             else:
                 projections = engine.project_all_scenarios(
-                    hist_rev, hist_exp, starting_cash, proj_start,
+                    hist_rev,
+                    hist_exp,
+                    starting_cash,
+                    proj_start,
                 )
             projection_status = "produced"
 
     if strict:
-        review_count = sum(
-            1 for s in report_statements for tx in s.transactions
-            if tx.cpa_review
-        )
+        review_count = sum(1 for s in report_statements for tx in s.transactions if tx.cpa_review)
         if review_count and not allow_review_items:
             logger.error(
                 "Strict mode: %d transactions require CPA review. "
@@ -2162,10 +2280,8 @@ def build_report(
             end_date_str or "the end",
         )
 
-    period_start_date = (datetime.strptime(start_date_str, "%Y-%m-%d").date()
-                         if start_date_str else None)
-    period_end_date = (datetime.strptime(end_date_str, "%Y-%m-%d").date()
-                       if end_date_str else None)
+    period_start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str else None
+    period_end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str else None
 
     # Pre-flight: check all output paths for overwrite conflicts
     output_paths_to_check: list[Path] = [output_path]
@@ -2174,14 +2290,20 @@ def build_report(
     if pl_csv_path:
         output_paths_to_check.append(pl_csv_path)
     if cpa_export_dir:
-        output_paths_to_check.extend([
-            cpa_export_dir / fn for fn in (
-                "cpa_revenue_detail.csv", "cpa_expense_detail.csv",
-                "cpa_uncategorized.csv", "cpa_reconciliation.csv",
-                "cpa_fixed_assets.csv", "cpa_loan_activity.csv",
-                "cpa_owner_activity.csv",
-            )
-        ])
+        output_paths_to_check.extend(
+            [
+                cpa_export_dir / fn
+                for fn in (
+                    "cpa_revenue_detail.csv",
+                    "cpa_expense_detail.csv",
+                    "cpa_uncategorized.csv",
+                    "cpa_reconciliation.csv",
+                    "cpa_fixed_assets.csv",
+                    "cpa_loan_activity.csv",
+                    "cpa_owner_activity.csv",
+                )
+            ]
+        )
     existing = [p for p in output_paths_to_check if p.exists()]
     if category_template_path:
         output_paths_to_check.append(category_template_path)
@@ -2192,9 +2314,7 @@ def build_report(
             "Output file(s) already exist. Use --overwrite to replace:\n  %s",
             paths_str,
         )
-        raise ReportGenerationError(
-            f"Output file(s) already exist. Use --overwrite to replace:\n  {paths_str}"
-        )
+        raise ReportGenerationError(f"Output file(s) already exist. Use --overwrite to replace:\n  {paths_str}")
 
     redact_names = [
         value
@@ -2261,25 +2381,20 @@ def build_report(
             pdf = builder.build()
             pdf.output(str(staging_pdf))
 
-        exporter = CSVExporter(report_statements, config, pl, projections,
-                               recon_results=recon_results, redactor=redactor)
-
-        staging_audit = staging_dir / audit_path.name if audit_path else None
-        staging_pl_csv = staging_dir / pl_csv_path.name if pl_csv_path else None
-        staging_cpa_dir = staging_dir / "cpa" if cpa_export_dir else None
-        staging_category = staging_dir / category_template_path.name if category_template_path else None
-
-        if staging_cpa_dir:
-            staging_cpa_dir.mkdir()
+        exporter = CSVExporter(
+            report_statements, config, pl, projections, recon_results=recon_results, redactor=redactor
+        )
 
         if audit_path:
-            exporter.export_audit(staging_audit)
+            exporter.export_audit(staging_dir / audit_path.name)
         if pl_csv_path:
-            exporter.export_pl(staging_pl_csv)
+            exporter.export_pl(staging_dir / pl_csv_path.name)
         if cpa_export_dir:
+            staging_cpa_dir = staging_dir / "cpa"
+            staging_cpa_dir.mkdir()
             exporter.export_cpa(staging_cpa_dir)
         if category_template_path:
-            exporter.export_category_template(staging_category)
+            exporter.export_category_template(staging_dir / category_template_path.name)
 
         # Backup existing outputs
         if output_path.exists():
@@ -2299,20 +2414,20 @@ def build_report(
 
         if audit_path:
             audit_path.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(str(staging_audit), str(audit_path))
+            os.replace(str(staging_dir / audit_path.name), str(audit_path))
         if pl_csv_path:
             pl_csv_path.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(str(staging_pl_csv), str(pl_csv_path))
+            os.replace(str(staging_dir / pl_csv_path.name), str(pl_csv_path))
         if cpa_export_dir:
             cpa_export_dir.mkdir(parents=True, exist_ok=True)
-            for f in sorted(staging_cpa_dir.iterdir()):
+            for f in sorted((staging_dir / "cpa").iterdir()):
                 dest = cpa_export_dir / f.name
                 if dest.exists():
                     dest.unlink()
                 os.replace(str(f), str(dest))
         if category_template_path:
             category_template_path.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(str(staging_category), str(category_template_path))
+            os.replace(str(staging_dir / category_template_path.name), str(category_template_path))
 
         shutil.rmtree(backup_dir)
     except Exception:

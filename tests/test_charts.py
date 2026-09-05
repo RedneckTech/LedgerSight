@@ -65,27 +65,29 @@ class TestCharts(unittest.TestCase):
         self.assertIsNotNone(buf)
 
     def test_chart_top_vendors(self):
-        stmt = make_stmt(transactions=[
-            make_tx(description="VENDOR A", amount="500.00", is_credit=False,
-                    include_in_pnl=True),
-            make_tx(description="VENDOR B", amount="300.00", is_credit=False,
-                    include_in_pnl=True),
-        ])
+        stmt = make_stmt(
+            transactions=[
+                make_tx(description="VENDOR A", amount="500.00", is_credit=False, include_in_pnl=True),
+                make_tx(description="VENDOR B", amount="300.00", is_credit=False, include_in_pnl=True),
+            ]
+        )
         buf = chart_top_vendors([stmt])
         self.assertIsNotNone(buf)
 
     def test_chart_top_revenue_sources(self):
-        stmt = make_stmt(transactions=[
-            make_tx(description="CUSTOMER A", amount="1000.00", is_credit=True,
-                    include_in_pnl=True),
-        ])
+        stmt = make_stmt(
+            transactions=[
+                make_tx(description="CUSTOMER A", amount="1000.00", is_credit=True, include_in_pnl=True),
+            ]
+        )
         buf = chart_top_revenue_sources([stmt])
         self.assertIsNotNone(buf)
 
     def test_chart_projection(self):
         hist = [Decimal("1000"), Decimal("1100")]
         proj = ProjectionResult(
-            scenario="base", months=3,
+            scenario="base",
+            months=3,
             monthly_revenue=[Decimal("1200"), Decimal("1300"), Decimal("1400")],
             monthly_expenses=[Decimal("700")] * 3,
             monthly_gross_profit=[Decimal("500")] * 3,

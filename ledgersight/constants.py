@@ -1,4 +1,5 @@
 """Shared constants for LedgerSight."""
+
 from __future__ import annotations
 
 import re
@@ -26,13 +27,20 @@ _QUARTER_MONTHS: dict[int, list[int]] = {
 }
 
 VALID_DEDUCTIBILITY = {
-    "likely-deductible", "possibly-deductible",
-    "not-normally-deductible", "unknown", "not-applicable",
+    "likely-deductible",
+    "possibly-deductible",
+    "not-normally-deductible",
+    "unknown",
+    "not-applicable",
 }
 
 VALID_ENTITY_TYPES = {
-    "sole-prop", "single-member-llc", "partnership",
-    "s-corp", "c-corp", "other",
+    "sole-prop",
+    "single-member-llc",
+    "partnership",
+    "s-corp",
+    "c-corp",
+    "other",
 }
 
 MONEY_RE = re.compile(

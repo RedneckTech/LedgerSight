@@ -1,5 +1,6 @@
 """LedgerSight-specific exceptions."""
 
+
 class LedgerSightError(RuntimeError):
     """Base exception for LedgerSight errors."""
 

@@ -84,9 +84,7 @@ class StatementsScreen(Screen[None]):
 
         data_dir = Path(app.state.data_dir)
         if not data_dir.exists():
-            self.query_one("#stmt-summary", Label).update(
-                f"No {data_dir}/ directory found."
-            )
+            self.query_one("#stmt-summary", Label).update(f"No {data_dir}/ directory found.")
             return
 
         pdfs = find_pdfs(data_dir)

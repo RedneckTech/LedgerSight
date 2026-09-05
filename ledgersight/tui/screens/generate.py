@@ -88,7 +88,10 @@ class GenerateScreen(Screen[None]):
         log.write("")
 
     @on(Button.Pressed, "#btn-generate")
-    async def _start_generate(self) -> None:
+    def _start_generate(self) -> None:
+        self.run_worker(self._generate_flow(), exclusive=True)
+
+    async def _generate_flow(self) -> None:
         app = self.app
         if not isinstance(app, LedgerSightApp):
             return
@@ -113,7 +116,7 @@ class GenerateScreen(Screen[None]):
 
         overwrite = False
         if output_path.exists():
-            result = await self.app.push_screen(OverwriteConfirm(str(output_path.name)))
+            result = await app.push_screen(OverwriteConfirm(str(output_path.name)), wait_for_dismiss=True)
             if not result:
                 self.query_one("#gen-status", Label).update("Cancelled.")
                 return
@@ -122,7 +125,7 @@ class GenerateScreen(Screen[None]):
         self.query_one("#btn-generate", Button).disabled = True
         self.query_one("#gen-status", Label).update("Generating report...")
 
-        self.run_worker(self._do_generate(overwrite=overwrite), exclusive=True)
+        await self._do_generate(overwrite=overwrite)
 
     async def _do_generate(self, overwrite: bool = False) -> None:
         app = self.app
@@ -172,11 +175,13 @@ class GenerateScreen(Screen[None]):
             progress.update(progress=30)
 
             output_path = app.state.output_path
+            if output_path is None:
+                log.write("[red]No output path configured. Set report options first.[/red]")
+                status_label.update("Error: No output path")
+                self.query_one("#btn-generate", Button).disabled = False
+                return
 
-            period_info = (
-                f"year={app.state.report_year or config.tax_year}, "
-                f"mode={app.state.report_mode}"
-            )
+            period_info = f"year={app.state.report_year or config.tax_year}, mode={app.state.report_mode}"
             if app.state.report_month:
                 period_info += f", month={app.state.report_month}"
             elif app.state.report_quarter:
