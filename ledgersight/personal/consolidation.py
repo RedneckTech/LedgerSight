@@ -86,7 +86,17 @@ class MonthActivity:
 
 @dataclass
 class MovementMatch:
-    """An internal transfer or card payment matched across two accounts."""
+    """An internal transfer or card payment matched across two accounts.
+
+    ``basis`` records how the pairing was established: ``"reference"`` (same
+    six-digit transfer reference on both sides), ``"autopay"`` (card payment
+    and the card's matching credit) or ``"amount+date"`` (equal and opposite
+    entries within two days with no shared reference - strong candidates
+    that still deserve a glance at the paper statements). Unmatched
+    movements carry ``basis=""``. ``unmatched_reason`` explains what is known
+    about an unmatched debit: the destination account is not covered, or the
+    destination's statement for that month is missing.
+    """
 
     from_account: str
     to_account: str
@@ -94,6 +104,10 @@ class MovementMatch:
     description: str
     amount: Decimal
     matched: bool
+    basis: str = ""
+    counter_date: str = ""
+    counter_description: str = ""
+    unmatched_reason: str = ""
 
 
 @dataclass
@@ -246,77 +260,214 @@ def _tx_key(tx: Transaction) -> tuple:
     return (tx.post_date, tx.description, str(tx.amount), tx.is_credit)
 
 
+_TRANSFER_DEBIT_MARKERS = ("WEB XFER", "CAPITAL ONE", "AUTOPAY", "MISCELLANEOUS DEBIT")
+_TRANSFER_CREDIT_MARKERS = ("XFER", "TRANSFER", "DEPOSIT")
+
+
+def _ledger_covers_date(ledger: AccountLedger, on_date: datetime.date) -> bool:
+    """True when one of the ledger's statements spans ``on_date``."""
+    return any(start <= on_date <= end for start, end in statement_windows(ledger))
+
+
+def statement_windows(ledger: AccountLedger) -> list[tuple[datetime.date, datetime.date]]:
+    """(start, end) of every statement; starts are inferred when not printed.
+
+    Card statements print only a closing date. Consecutive statements abut,
+    so the start is the day after the previous close when that close is
+    within a monthly cycle; otherwise the first transaction date is used.
+    """
+    ends = sorted(_to_date(s.statement_date) for s in ledger.statements)
+    windows: list[tuple[datetime.date, datetime.date]] = []
+    for stmt in ledger.statements:
+        end = _to_date(stmt.statement_date)
+        if stmt.period_start:
+            start = _to_date(stmt.period_start)
+        else:
+            earlier = [e for e in ends if e < end]
+            if earlier and (end - max(earlier)).days <= 35:
+                start = max(earlier) + datetime.timedelta(days=1)
+            else:
+                dates = [_to_date(t.post_date) for t in stmt.transactions]
+                start = min(dates) if dates else end
+        windows.append((start, end))
+    return windows
+
+
+def ledger_covers_month(ledger: AccountLedger, year: int, month: int) -> bool:
+    """True when at least one statement window overlaps the calendar month."""
+    first = datetime.date(year, month, 1)
+    last = (datetime.date(year + 1, 1, 1) if month == 12 else datetime.date(year, month + 1, 1)) - datetime.timedelta(
+        days=1
+    )
+    return any(start <= last and end >= first for start, end in statement_windows(ledger))
+
+
+def month_fully_covered(ledger: AccountLedger, year: int, month: int) -> bool:
+    """True when statement windows span every day of the calendar month.
+
+    Used to pick "complete" months for monthly baselines: the first and last
+    months of a statement run are usually partial and would understate
+    averages.
+    """
+    first = datetime.date(year, month, 1)
+    last = (datetime.date(year + 1, 1, 1) if month == 12 else datetime.date(year, month + 1, 1)) - datetime.timedelta(
+        days=1
+    )
+    windows = sorted(statement_windows(ledger))
+    day = first
+    for start, end in windows:
+        if end < day:
+            continue
+        if start > day:
+            return False
+        day = end + datetime.timedelta(days=1)
+        if day > last:
+            return True
+    return day > last
+
+
 def match_movements(ledgers: list[AccountLedger]) -> list[MovementMatch]:
     """Pair up transfers and card payments between accounts.
 
     Returns one MovementMatch per debit that looks like money leaving an
-    account (transfer or card payment); ``matched`` is True when a credit
-    for the same transfer reference (or card autopay) exists in another
-    account. A credit is only used to satisfy a single debit.
+    account (transfer, teller "miscellaneous debit" or card payment).
+    ``matched`` is True when an offsetting credit exists in another covered
+    account, established in this order of confidence:
+
+    1. ``reference`` - both sides carry the same six-digit transfer reference;
+    2. ``autopay`` - a card payment and the card's matching payment credit;
+    3. ``amount+date`` - an equal and opposite transfer-like credit within two
+       days when neither side prints a usable reference (the descriptions
+       may have been damaged by the statement layout).
+
+    A credit is only used to satisfy a single debit. Unmatched debits get an
+    ``unmatched_reason`` when the destination can be inferred from the
+    description (account not covered, or its statement for that month is
+    missing).
     """
     transfer_ref = r"(?<!\d)(\d{6})(?!\d)"
+    by_suffix = {led.account_number[-4:]: led for led in ledgers}
 
-    def _counterbalance(debit: Transaction, used_credits: set[tuple]) -> tuple[AccountLedger, Transaction] | None:
+    def _is_transfer_debit(tx: Transaction) -> bool:
+        upper = tx.description.upper()
+        return any(marker in upper for marker in _TRANSFER_DEBIT_MARKERS) or tx.category in MOVEMENT_CATEGORIES
+
+    def _counterbalance(
+        ledger: AccountLedger, debit: Transaction, used_credits: set[tuple], allow_fallback: bool
+    ) -> tuple[AccountLedger, Transaction, str] | None:
         tx_date = _to_date(debit.post_date)
         refs = set(re.findall(transfer_ref, debit.description))
-        is_card_payment = "CAPITAL ONE" in debit.description.upper() or "AUTOPAY" in debit.description.upper()
-        best: tuple[AccountLedger, Transaction] | None = None
+        upper = debit.description.upper()
+        is_card_payment = "CAPITAL ONE" in upper or "AUTOPAY" in upper
+        named = re.search(r"X{4,}(\d{4})", debit.description)
+        named_suffix = named.group(1) if named else ""
+        rank = {"reference": 0, "autopay": 0, "amount+date": 1}
+        best: tuple[int, int, AccountLedger, Transaction, str] | None = None
         for cand_ledger in ledgers:
             if cand_ledger.account_number == ledger.account_number:
                 continue
             for ctx in cand_ledger.transactions:
-                if _tx_key(ctx) in used_credits:
+                if _tx_key(ctx) in used_credits or not ctx.is_credit or ctx.amount != debit.amount:
                     continue
-                if not ctx.is_credit or ctx.amount != debit.amount:
-                    continue
-                if abs((_to_date(ctx.post_date) - tx_date).days) > 5:
+                gap = abs((_to_date(ctx.post_date) - tx_date).days)
+                if gap > 5:
                     continue
                 cupper = ctx.description.upper()
+                basis = ""
                 if is_card_payment:
-                    if not ("CAPITAL ONE" in cupper or "AUTOPAY" in cupper):
-                        continue
-                elif not (set(re.findall(transfer_ref, ctx.description)) & refs):
+                    if "CAPITAL ONE" in cupper or "AUTOPAY" in cupper or "PAYMENT" in cupper:
+                        basis = "autopay"
+                elif refs and (set(re.findall(transfer_ref, ctx.description)) & refs):
+                    basis = "reference"
+                elif (
+                    allow_fallback
+                    and gap <= 2
+                    and cand_ledger.account_type != "Credit Card"
+                    # A debit that names its destination ("... XXXXXX2136") can
+                    # only pair with that account.
+                    and (not named_suffix or cand_ledger.account_number.endswith(named_suffix))
+                    and (ctx.category in MOVEMENT_CATEGORIES or any(m in cupper for m in _TRANSFER_CREDIT_MARKERS))
+                ):
+                    basis = "amount+date"
+                if not basis:
                     continue
-                if best is None:
-                    best = (cand_ledger, ctx)
-                elif abs((_to_date(ctx.post_date) - tx_date).days) < abs((_to_date(best[1].post_date) - tx_date).days):
-                    best = (cand_ledger, ctx)
-        return best
+                key = (rank[basis], gap)
+                if best is None or key < (best[0], best[1]):
+                    best = (key[0], key[1], cand_ledger, ctx, basis)
+        if best is None:
+            return None
+        return best[2], best[3], best[4]
+
+    def _unmatched_reason(debit: Transaction) -> str:
+        if "PAYPAL" in debit.description.upper():
+            return "moved to a PayPal balance, which is not a covered account"
+        m = re.search(r"X{4,}(\d{4})", debit.description)
+        if not m:
+            return "no offsetting credit found in the covered accounts"
+        suffix = m.group(1)
+        dest = by_suffix.get(suffix)
+        if dest is None:
+            return f"destination account ****{suffix} is not covered by any statement"
+        if not _ledger_covers_date(dest, _to_date(debit.post_date)):
+            return f"{dest.label} has no statement covering {_to_date(debit.post_date):%B %Y}"
+        return f"no offsetting credit found in {dest.label}"
+
+    # Pass 1 pairs every debit that can be tied by reference number or
+    # autopay; only then does pass 2 try amount+date for what is left, so a
+    # low-confidence pairing can never steal a credit that belongs to a
+    # reference-matched transfer.
+    debits = [
+        (ledger, tx) for ledger in ledgers for tx in ledger.transactions if not tx.is_credit and _is_transfer_debit(tx)
+    ]
+    paired: dict[int, tuple[AccountLedger, Transaction, str]] = {}
+    used_credits: set[tuple] = set()
+    for allow_fallback in (False, True):
+        for ledger, tx in debits:
+            if id(tx) in paired:
+                continue
+            counter = _counterbalance(ledger, tx, used_credits, allow_fallback)
+            if counter is not None:
+                used_credits.add(_tx_key(counter[1]))
+                paired[id(tx)] = counter
 
     matches: list[MovementMatch] = []
-    used_credits: set[tuple] = set()
-    for ledger in ledgers:
-        for tx in ledger.transactions:
-            if tx.is_credit:
-                continue
-            upper = tx.description.upper()
-            if "WEB XFER" not in upper and "CAPITAL ONE" not in upper and "AUTOPAY" not in upper:
-                continue
-            counter = _counterbalance(tx, used_credits)
-            if counter is not None:
-                counter_ledger, ctx = counter
-                used_credits.add(_tx_key(ctx))
-                matches.append(
-                    MovementMatch(
-                        from_account=ledger.account_number,
-                        to_account=counter_ledger.account_number,
-                        date=tx.post_date,
-                        description=tx.description,
-                        amount=tx.amount,
-                        matched=True,
-                    )
+    for ledger, tx in debits:
+        counter = paired.get(id(tx))
+        if counter is not None:
+            counter_ledger, ctx, basis = counter
+            if basis == "amount+date":
+                # A teller "MISCELLANEOUS DEBIT" paired with a plain "DEPOSIT"
+                # is an internal transfer on both sides: neither is spending
+                # or income once the pairing is established.
+                if tx.category not in DEBT_CATEGORIES:
+                    tx.category = "Transfers"
+                if ctx.category not in DEBT_CATEGORIES:
+                    ctx.category = "Transfers"
+            matches.append(
+                MovementMatch(
+                    from_account=ledger.account_number,
+                    to_account=counter_ledger.account_number,
+                    date=tx.post_date,
+                    description=tx.description,
+                    amount=tx.amount,
+                    matched=True,
+                    basis=basis,
+                    counter_date=ctx.post_date,
+                    counter_description=ctx.description,
                 )
-            else:
-                matches.append(
-                    MovementMatch(
-                        from_account=ledger.account_number,
-                        to_account="",
-                        date=tx.post_date,
-                        description=tx.description,
-                        amount=tx.amount,
-                        matched=False,
-                    )
+            )
+        else:
+            matches.append(
+                MovementMatch(
+                    from_account=ledger.account_number,
+                    to_account="",
+                    date=tx.post_date,
+                    description=tx.description,
+                    amount=tx.amount,
+                    matched=False,
+                    unmatched_reason=_unmatched_reason(tx),
                 )
+            )
     return matches
 
 

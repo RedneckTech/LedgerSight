@@ -236,69 +236,111 @@ def chart_daily_balance_single(stmt: Statement) -> io.BytesIO:
 
 
 def chart_weekly_balance_ledgers(ledgers: list[AccountLedger]) -> io.BytesIO:
-    """Weekly average balance reconstructed after deduplicating overlaps.
+    """Weekly average balances: cash & savings, card balances owed, and net.
 
-    The daily balance of every account is rebuilt from its earliest statement
-    start, so overlapping statement windows are not double-counted.
+    Cash (checking + savings) and card debt are plotted as separate series
+    instead of one meaningless "combined" total; a third line shows the net
+    position (cash minus card debt). Each account's daily balance is rebuilt
+    from its earliest statement, and a day only counts for a series when
+    every account in that group has a statement covering it - weeks where an
+    account is missing are drawn dotted.
     """
     from datetime import timedelta
 
-    from ledgersight.personal.consolidation import _to_date, balance_asof
+    from ledgersight.personal.consolidation import _to_date, balance_asof, statement_windows
 
     if not ledgers:
         return _empty_png_buf("No ledger data")
 
-    combined: dict[date, float] = {}
-    for ledger in ledgers:
-        if not ledger.transactions:
-            continue
-        d0 = _to_date(ledger.first_tx_date)
-        d1 = _to_date(ledger.as_of or ledger.last_tx_date)
-        day = d0
-        while day <= d1:
-            combined[day] = combined.get(day, 0.0) + float(balance_asof(ledger, day))
-            day += timedelta(days=1)
+    cash_ledgers = [led for led in ledgers if led.account_type != "Credit Card" and led.transactions]
+    card_ledgers = [led for led in ledgers if led.account_type == "Credit Card" and led.transactions]
+    windows = {led.account_number: statement_windows(led) for led in ledgers}
 
-    if not combined:
+    def covered(led: AccountLedger, day: date) -> bool:
+        return any(start <= day <= end for start, end in windows[led.account_number])
+
+    all_days: list[date] = []
+    starts = [_to_date(led.first_tx_date) for led in ledgers if led.transactions]
+    ends = [_to_date(led.as_of or led.last_tx_date) for led in ledgers if led.transactions]
+    if not starts:
+        return _empty_png_buf("No daily balance data")
+    day = min(starts)
+    while day <= max(ends):
+        all_days.append(day)
+        day += timedelta(days=1)
+
+    def series(group: list[AccountLedger]) -> tuple[dict[date, float], dict[date, bool]]:
+        values: dict[date, float] = {}
+        complete: dict[date, bool] = {}
+        for d in all_days:
+            active = [led for led in group if covered(led, d)]
+            if not active:
+                continue
+            values[d] = sum(float(balance_asof(led, d)) for led in active)
+            complete[d] = len(active) == len(group)
+        return values, complete
+
+    cash_vals, cash_ok = series(cash_ledgers)
+    card_vals, card_ok = series(card_ledgers)
+    if not cash_vals and not card_vals:
         return _empty_png_buf("No daily balance data")
 
-    week_bals: dict[tuple[int, int], list[float]] = defaultdict(list)
-    for day, bal in sorted(combined.items()):
-        iso = day.isocalendar()
-        week_bals[(iso[0], iso[1])].append(bal)
+    def weekly(
+        values: dict[date, float], ok: dict[date, bool]
+    ) -> tuple[list[tuple[int, int]], list[float], list[bool]]:
+        buckets: dict[tuple[int, int], list[float]] = defaultdict(list)
+        flags: dict[tuple[int, int], bool] = defaultdict(lambda: True)
+        for d, v in values.items():
+            iso = d.isocalendar()
+            buckets[(iso[0], iso[1])].append(v)
+            flags[(iso[0], iso[1])] &= ok[d]
+        keys = sorted(buckets)
+        return keys, [sum(buckets[k]) / len(buckets[k]) for k in keys], [flags[k] for k in keys]
 
-    points = sorted((k, sum(bals) / len(bals)) for k, bals in week_bals.items())
-    positions = list(range(len(points)))
-    balances = [p[1] for p in points]
-    x_labels = [f"{y}-W{wk:02d}" for y, wk in [p[0] for p in points]]
+    cash_keys, cash_avg, cash_flags = weekly(cash_vals, cash_ok)
+    card_keys, card_avg, card_flags = weekly(card_vals, card_ok)
+    all_keys = sorted(set(cash_keys) | set(card_keys))
+    pos = {k: i for i, k in enumerate(all_keys)}
+    x_labels = [f"{y}-W{wk:02d}" for y, wk in all_keys]
 
     fig, ax = plt.subplots(figsize=(12, 7))
-    ax.plot(
-        positions,
-        balances,
-        color="#2c3e50",
-        linewidth=1.6,
-        marker="o",
-        markersize=3,
-        alpha=0.85,
-    )
-    ax.fill_between(positions, 0, balances, alpha=0.08, color="#2c3e50")
-    ax.axhline(y=0, color="#e74c3c", linewidth=0.5, linestyle="--", alpha=0.5)
-    step = max(1, len(positions) // 15)
-    shown_positions = positions[::step]
-    ax.set_xticks(shown_positions)
-    ax.set_xticklabels(
-        [x_labels[i] for i in shown_positions],
-        rotation=45,
-        ha="right",
-        fontsize=8,
-    )
-    ax.set_ylabel("Average Weekly Balance ($)", fontsize=9)
+
+    def draw(keys: list[tuple[int, int]], avg: list[float], flags: list[bool], color: str, label: str) -> None:
+        if not keys:
+            return
+        xs = [pos[k] for k in keys]
+        # solid where every account in the group is covered, dotted otherwise
+        for i in range(len(xs)):
+            if i == 0:
+                continue
+            style = "-" if flags[i] and flags[i - 1] else ":"
+            ax.plot(xs[i - 1 : i + 1], avg[i - 1 : i + 1], color=color, linewidth=1.8, linestyle=style)
+        ax.plot([], [], color=color, linewidth=1.8, label=label)
+        ax.scatter(xs, avg, color=color, s=9, zorder=3)
+
+    draw(cash_keys, cash_avg, cash_flags, "#2c3e50", "Cash & savings (checking + savings)")
+    draw(card_keys, card_avg, card_flags, "#c0392b", "Card balances owed (Capital One)")
+    net_keys = [k for k in all_keys if k in set(cash_keys) and k in set(card_keys)]
+    if net_keys:
+        cash_map = dict(zip(cash_keys, cash_avg))
+        card_map = dict(zip(card_keys, card_avg))
+        ok_map = {k: f for k, f in zip(cash_keys, cash_flags)}
+        ok_map_card = {k: f for k, f in zip(card_keys, card_flags)}
+        net_avg = [cash_map[k] - card_map[k] for k in net_keys]
+        net_flags = [ok_map[k] and ok_map_card[k] for k in net_keys]
+        draw(net_keys, net_avg, net_flags, "#7f8c8d", "Net position (cash \u2212 card debt)")
+    ax.axhline(y=0, color="#999999", linewidth=0.6, linestyle="--", alpha=0.7)
+    step = max(1, len(all_keys) // 15)
+    shown = list(range(0, len(all_keys), step))
+    ax.set_xticks(shown)
+    ax.set_xticklabels([x_labels[i] for i in shown], rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("Average weekly balance ($)", fontsize=9)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
-    ax.set_title("Weekly Average Balance \u2013 Covered Accounts", fontsize=11, fontweight="bold")
+    ax.set_title("Weekly Average Balances \u2013 cash, card debt and net position", fontsize=11, fontweight="bold")
+    ax.legend(loc="upper left", fontsize=8, frameon=False)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.set_xlim(-0.5, len(points) - 0.5)
+    ax.set_xlim(-0.5, len(all_keys) - 0.5)
     fig.tight_layout()
 
     buf = io.BytesIO()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import unittest
 from decimal import Decimal
 from pathlib import Path
@@ -330,22 +331,37 @@ class TestWriteAuditCsv(unittest.TestCase):
     def test_audit_rows(self) -> None:
         stmt = make_stmt()
         result = consolidate([stmt])
-        run_maps = dict(running_balance_map(result.ledgers[0]))
+        ledger = result.ledgers[0]
+        run_maps = dict(running_balance_map(ledger))
+        seq_maps = {id(t): i for i, t in enumerate(ledger.transactions, start=1)}
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "audit.csv"
-            _write_audit_csv([stmt], path, mask_personal=True, run_maps=run_maps)
-            lines = path.read_text().splitlines()
+            _write_audit_csv([stmt], path, mask_personal=True, run_maps=run_maps, seq_maps=seq_maps)
+            rows = list(csv.DictReader(path.open()))
         self.assertEqual(
-            lines[0],
-            "Account,Statement,PostDate,Description,Amount,Type,Balance,Category,Running",
+            list(rows[0].keys()),
+            [
+                "Account",
+                "Statement",
+                "PostDate",
+                "Description",
+                "Amount",
+                "Type",
+                "Balance",
+                "Category",
+                "Running",
+                "Seq",
+                "Source",
+            ],
         )
-        self.assertEqual(len(lines), 5)
-        credit_line = [line for line in lines if line.split(",")[5] == "Credit"][0]
-        self.assertTrue(credit_line.split(",")[4] == "500.00")
-        self.assertTrue(credit_line.endswith("600.00"))
-        debit_lines = [line for line in lines if line.split(",")[5] == "Debit"]
-        self.assertEqual(len(debit_lines), 3)
-        self.assertTrue(all(line.split(",")[4].startswith("-") for line in debit_lines))
+        self.assertEqual(len(rows), 4)
+        credit = [r for r in rows if r["Type"] == "Credit"][0]
+        self.assertEqual(credit["Amount"], "500.00")
+        self.assertEqual(credit["Running"], "600.00")
+        self.assertEqual(credit["Seq"], "1")
+        debits = [r for r in rows if r["Type"] == "Debit"]
+        self.assertEqual(len(debits), 3)
+        self.assertTrue(all(r["Amount"].startswith("-") for r in debits))
 
 
 class TestWriteTransactionsCsv(unittest.TestCase):
@@ -360,13 +376,47 @@ class TestWriteTransactionsCsv(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "tx.csv"
             _write_transactions_csv(result, path, mask_personal=True)
-            lines = path.read_text().splitlines()
-        self.assertEqual(lines[0], "Account,Account Type,Date,Description,Category,Amount,Type,Balance")
-        self.assertEqual(len(lines), 6)
-        payroll = [line for line in lines if "RICHERS" in line]
+            rows = list(csv.DictReader(path.open()))
+        self.assertEqual(
+            list(rows[0].keys()),
+            [
+                "Account",
+                "Account Type",
+                "Seq",
+                "Date",
+                "Description",
+                "Category",
+                "Amount",
+                "Type",
+                "Balance",
+                "Source",
+            ],
+        )
+        self.assertEqual(len(rows), 5)
+        payroll = [r for r in rows if "RICHERS" in r["Description"]]
         self.assertEqual(len(payroll), 1)
-        mask_line = payroll[0]
-        self.assertEqual(mask_line.split(",")[3], "RICHERS TRUCKING PAYROLL")
+        self.assertEqual(payroll[0]["Description"], "RICHERS TRUCKING PAYROLL")
+
+    def test_export_order_matches_running_balances(self) -> None:
+        # Same-day rows must be exported in calculation order so consecutive
+        # balances chain: balance[i] == balance[i-1] +/- amount[i].
+        stmt = make_stmt()
+        stmt.transactions = [
+            make_tx("05/08/2026", "DOORDASH", "20.00", False, "80.00"),
+            make_tx("05/08/2026", "LOVE'S #0687", "30.00", False, "50.00"),
+            make_tx("05/08/2026", "RICHERS TRUCKING PAYROLL", "500.00", True, "550.00"),
+        ]
+        stmt.ending_balance = Decimal("550.00")
+        result = consolidate([stmt])
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tx.csv"
+            _write_transactions_csv(result, path, mask_personal=False)
+            rows = list(csv.DictReader(path.open()))
+        self.assertEqual([r["Seq"] for r in rows], ["1", "2", "3"])
+        previous = stmt.beginning_balance
+        for r in rows:
+            self.assertEqual(Decimal(r["Balance"]), previous + Decimal(r["Amount"]))
+            previous = Decimal(r["Balance"])
 
 
 class TestDuplicateDetailRows(unittest.TestCase):
@@ -425,3 +475,50 @@ class TestGenerateReport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestIncomeToCashBridge(unittest.TestCase):
+    def test_bridge_sums_to_observed_change(self) -> None:
+        import datetime
+
+        from ledgersight.personal.insights import dashboard_totals
+        from ledgersight.personal.report import _flow_split, _income_to_cash_bridge
+
+        result = consolidate([make_stmt(), make_card_stmt()])
+        totals = dashboard_totals(result, datetime.date(2026, 2, 1))
+        flow = _flow_split(result)
+        bridge = _income_to_cash_bridge(totals, flow)
+        steps = sum((amt for label, amt in bridge if not label.startswith("=")), Decimal("0"))
+        self.assertEqual(steps, bridge[-1][1])
+        self.assertEqual(bridge[-1][1], totals["total_credits"] - totals["total_debits"])
+        self.assertEqual(bridge[0][0], "Income (payroll + other deposits)")
+        self.assertEqual(bridge[2][0], "= Income less categorized spending")
+
+
+class TestGenerateReportWithChecks(unittest.TestCase):
+    def test_checks_yaml_recategorizes_and_renders(self) -> None:
+        stmt = make_stmt()
+        stmt.transactions.append(make_tx("01/20/2026", "CHECK # 5001", "100.00", False, "300.00"))
+        stmt.ending_balance = Decimal("300.00")
+        stmt.total_debits = Decimal("300.00")
+        stmt.debit_count = 4
+        with TemporaryDirectory() as tmp:
+            tmp_p = Path(tmp)
+            checks = tmp_p / "checks.yaml"
+            checks.write_text("5001:\n  payee: Landlord\n  category: Rent\n")
+            pdf = tmp_p / "report.pdf"
+            tx_csv = tmp_p / "tx.csv"
+            ok = generate_report(
+                [stmt],
+                pdf,
+                mode="yearly",
+                target_year=2026,
+                transactions_csv_path=tx_csv,
+                checks_path=checks,
+            )
+            self.assertTrue(ok)
+            rows = list(csv.DictReader(tx_csv.open()))
+        check_rows = [r for r in rows if "CHECK # 5001" in r["Description"]]
+        self.assertEqual(len(check_rows), 1)
+        self.assertEqual(check_rows[0]["Category"], "Rent")
+        self.assertIn("Landlord", check_rows[0]["Description"])

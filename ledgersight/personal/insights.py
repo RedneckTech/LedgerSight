@@ -28,8 +28,10 @@ from ledgersight.personal.consolidation import (
     ConsolidatedResult,
     _to_date,
     balance_asof,
+    ledger_covers_month,
+    month_fully_covered,
 )
-from ledgersight.personal.models import Transaction
+from ledgersight.personal.models import Statement, Transaction
 
 INCOME_CATEGORIES = {"Payroll", "Deposit", "Government"}
 BILL_EXCLUDED_CATEGORIES = {"Transfers", "Other"}
@@ -48,6 +50,7 @@ _REFUND_MARKERS = ("REFUND", "REFUNDED", "REVERSAL")
 # when grouping payees so "PAYPAL INST XFER HIDIVE" (March) and
 # "PAYPAL PURCHASE HIDIVE" (August) collapse into one HIDIVE merchant.
 _MERCHANT_NOISE_TOKENS = {
+    "XX",  # masked-card memo remnant ("XX0844" with digits stripped)
     "PAYPAL",
     "INST",
     "XFER",
@@ -89,11 +92,17 @@ def canon_merchant(name: str) -> str:
 
 
 _LEADING_MEMO_DATE = re.compile(r"^\d{1,2}/\d{1,2}/\d{2,4}\s+")
+# order / confirmation codes such as "BM8QT1VH" or "FK5B38DL": letters and digits mixed
+_ORDER_CODE = re.compile(r"\b(?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{6,}\b")
 
 
 def display_merchant(name: str) -> str:
-    """Human-facing payee name: drops a leading memo date such as ``3/17/26``."""
-    return _LEADING_MEMO_DATE.sub("", name).strip() or name
+    """Human-facing payee name: drops a leading memo date such as ``3/17/26``
+    and mixed letter/digit order codes that differ on every charge."""
+    cleaned = _LEADING_MEMO_DATE.sub("", name)
+    cleaned = _ORDER_CODE.sub("", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,-")
+    return cleaned or name
 
 
 def best_display_name(names: Iterable[str]) -> str:
@@ -122,44 +131,75 @@ def _months_between(start: datetime.date, end: datetime.date) -> int:
 
 
 def month_series(ledgers: list[AccountLedger]) -> dict[tuple[int, int], dict[str, Any]]:
-    """Per calendar month: income, spending, cash balance, card debt.
+    """Per calendar month: income split, spending, observed change, balances.
 
-    ``income`` is earned income only (income-category credits minus refunds);
-    refunds are reported separately. ``spending`` uses the unified definition
-    (``is_spending``). ``cash_accounts`` / ``cash_accounts_total`` let the
-    renderer flag months where some accounts have no statement (the counters
-    are ints, unlike the Decimal money fields).
+    Money fields (Decimal): ``payroll`` (Payroll-category credits), ``deposits``
+    (other income-category credits, source not confirmed), ``income``
+    (payroll + deposits, i.e. earned income excluding refunds), ``refunds``,
+    ``spending`` (unified ``is_spending`` rule), ``total_credits`` /
+    ``total_debits`` (every credit/debit that month), ``cash`` and ``debt``
+    (month-end balances summed over the cash / card accounts that have a
+    statement covering the month).
+
+    Coverage fields: ``balances`` maps each account label to its month-end
+    balance or ``None`` when no statement covers the month; ``missing`` lists
+    the labels without coverage; ``cash_accounts`` / ``cash_accounts_total``
+    count covered vs. all cash accounts (ints).
     """
     non_card_count = sum(1 for led in ledgers if led.account_type != "Credit Card")
     series: dict[tuple[int, int], dict[str, Any]] = defaultdict(
         lambda: {
+            "payroll": Decimal("0"),
+            "deposits": Decimal("0"),
             "income": Decimal("0"),
             "refunds": Decimal("0"),
             "spending": Decimal("0"),
+            "total_credits": Decimal("0"),
+            "total_debits": Decimal("0"),
             "cash": Decimal("0"),
             "debt": Decimal("0"),
+            "balances": {},
+            "missing": [],
             "cash_accounts": 0,
             "cash_accounts_total": non_card_count,
         }
     )
     for ledger in ledgers:
-        is_card = ledger.account_type == "Credit Card"
         for month in ledger.months:
             entry = series[(month.year, month.month)]
             for tx in month.transactions:
+                if tx.is_credit:
+                    entry["total_credits"] += tx.amount
+                else:
+                    entry["total_debits"] += tx.amount
                 if tx.is_credit and tx.category in INCOME_CATEGORIES:
                     if is_refund(tx):
                         entry["refunds"] += tx.amount
+                    elif tx.category == "Payroll":
+                        entry["payroll"] += tx.amount
+                        entry["income"] += tx.amount
                     else:
+                        entry["deposits"] += tx.amount
                         entry["income"] += tx.amount
                 elif is_spending(tx):
                     entry["spending"] += tx.amount
-            bal = balance_asof(ledger, _last_day(month.year, month.month))
-            if is_card:
-                entry["debt"] += bal
+    # Balances are filled for every month in the series so a month with no
+    # activity in one account still shows that account's carried balance -
+    # unless no statement covers the month, in which case it is unknown.
+    for (year, mon), entry in series.items():
+        for ledger in ledgers:
+            is_card = ledger.account_type == "Credit Card"
+            if ledger_covers_month(ledger, year, mon):
+                bal = balance_asof(ledger, _last_day(year, mon))
+                entry["balances"][ledger.label] = bal
+                if is_card:
+                    entry["debt"] += bal
+                else:
+                    entry["cash"] += bal
+                    entry["cash_accounts"] += 1
             else:
-                entry["cash"] += bal
-                entry["cash_accounts"] += 1
+                entry["balances"][ledger.label] = None
+                entry["missing"].append(ledger.label)
     return dict(sorted(series.items()))
 
 
@@ -172,7 +212,9 @@ def dashboard_totals(result: ConsolidatedResult, as_of: datetime.date) -> dict[s
 
     The report-wide definitions live here so every page agrees:
 
-    - ``earned_income`` excludes refunds and transfers-in.
+    - ``earned_income`` excludes refunds and transfers-in; it is split into
+      ``payroll`` (identified employer deposits) and ``deposits`` (other
+      income-category credits whose source is not confirmed).
     - ``spending`` (unified) includes uncategorized "Other" debits.
     - ``savings`` is the observed change in cash & savings plus the reduction
       in credit-card debt over the covered period - the number that survives
@@ -214,9 +256,14 @@ def dashboard_totals(result: ConsolidatedResult, as_of: datetime.date) -> dict[s
     cash = sum((Decimal(a["balance"]) for a in cash_accounts), Decimal("0"))
     debt = sum((Decimal(a["balance"]) for a in debt_accounts), Decimal("0"))
     earned = income_total - refunds
+    payroll = sum(
+        (t.amount for t in all_tx if t.is_credit and t.category == "Payroll" and not is_refund(t)), Decimal("0")
+    )
     return {
         "earned_income": earned,
         "income": earned,
+        "payroll": payroll,
+        "deposits": earned - payroll,
         "income_credits": income_total,
         "refunds": refunds,
         "transfers_in": transfers_in,
@@ -367,8 +414,8 @@ def estimate_income_groups(
     recurring detection (pay-by-mile trucking checks, irregular deposits).
 
     Only the trailing ``window_days`` are analyzed so recent behavior drives
-    the estimate; the median gap and median amount of the group's entries in
-    that window produce a single 'next expected' date.
+    the estimate; the median gap between distinct pay dates and the median
+    daily total in that window produce the 'next expected' date and amount.
     """
     groups: dict[str, list[Transaction]] = defaultdict(list)
     window_start = as_of - datetime.timedelta(days=window_days)
@@ -382,22 +429,27 @@ def estimate_income_groups(
 
     estimates: list[EstimatedIncome] = []
     for payee, txs in groups.items():
-        if len(txs) < min_occurrences:
+        # Two deposits on one day are one payday: collapse them before
+        # measuring the cadence, or a double payment reads as a 0-day gap and
+        # drags a weekly schedule down to "every 6 days".
+        per_day: dict[datetime.date, Decimal] = defaultdict(Decimal)
+        for t in txs:
+            per_day[_to_date(t.post_date)] += t.amount
+        if len(per_day) < min_occurrences:
             continue
-        dates = sorted(_to_date(t.post_date) for t in txs)
+        dates = sorted(per_day)
         gaps = [(dates[i + 1] - dates[i]).days for i in range(len(dates) - 1)]
         cadence = int(median(gaps)) if gaps else 7
         if cadence < 3 or cadence > 35:
             continue
-        amounts = [t.amount for t in txs]
-        median_amount = Decimal(median(amounts)).quantize(Decimal("0.01"), rounding="ROUND_HALF_UP")
+        median_amount = Decimal(median(per_day.values())).quantize(Decimal("0.01"), rounding="ROUND_HALF_UP")
         next_event = dates[-1] + datetime.timedelta(days=cadence)
         if next_event <= as_of:
             continue
         estimates.append(
             EstimatedIncome(
                 payee=payee,
-                occurrences=len(txs),
+                occurrences=len(dates),
                 median_amount=median_amount,
                 median_cadence_days=cadence,
                 last_date=dates[-1],
@@ -526,23 +578,90 @@ def category_spend_totals(ledgers: Iterable[AccountLedger]) -> dict[str, Decimal
     return dict(totals)
 
 
-def typical_monthly_spending(
-    ledgers: Iterable[AccountLedger],
-    months: int,
-) -> dict[str, Decimal]:
-    """Average monthly debits by category, using the unified spending rule.
+@dataclass
+class OutflowBaseline:
+    """Average monthly cash outflow for one bucket, from complete months only.
 
-    Transfers and loan/card payments are excluded so the result can be
-    combined with the recurring-bill forecast without double counting.
+    ``scheduled`` is the monthly equivalent of the active recurring bills that
+    fall in this bucket; ``allowance`` is what remains to be budgeted for
+    charges that were not individually forecast.
     """
-    per_category: dict[str, Decimal] = defaultdict(Decimal)
-    for ledger in ledgers:
-        for tx in ledger.transactions:
-            if is_spending(tx) and tx.category:
-                per_category[tx.category] += tx.amount
-    if months < 1:
-        return dict(per_category)
-    return {name: amount / Decimal(months) for name, amount in per_category.items()}
+
+    label: str
+    monthly: Decimal
+    scheduled: Decimal = Decimal("0")
+    months: int = 0
+
+    @property
+    def allowance(self) -> Decimal:
+        return max(self.monthly - self.scheduled, Decimal("0"))
+
+
+LOAN_BUCKET = "Loan/card payments"
+OUTSIDE_TRANSFER_BUCKET = "Transfers to outside accounts"
+
+
+def complete_months(ledger: AccountLedger) -> list[tuple[int, int]]:
+    """Calendar months whose every day is covered by the ledger's statements."""
+    return [(m.year, m.month) for m in ledger.months if month_fully_covered(ledger, m.year, m.month)]
+
+
+def cash_outflow_baselines(
+    result: ConsolidatedResult,
+    repeating: Iterable[RepeatingPayment] = (),
+) -> list[OutflowBaseline]:
+    """Monthly cash outflows by bucket for the cash (non-card) accounts.
+
+    Only months fully covered by statements count, so a partial first or
+    last month cannot drag the average down. Buckets are the spending
+    categories, plus loan/card payments (they leave the cash accounts even
+    when they pay down a covered card) and transfers to accounts outside
+    these statements. Internal transfers between covered accounts are not
+    outflows and are excluded. Active recurring bills are subtracted per
+    bucket so the remaining allowance never double counts them.
+    """
+    matched_keys = {(m.from_account, m.date, str(m.amount), m.description) for m in result.movements if m.matched}
+    totals: dict[str, Decimal] = defaultdict(Decimal)
+    months_used: dict[str, set[tuple[int, int]]] = defaultdict(set)
+    for ledger in result.ledgers:
+        if ledger.account_type == "Credit Card":
+            continue
+        full = set(complete_months(ledger))
+        if not full:
+            continue
+        for month in ledger.months:
+            if (month.year, month.month) not in full:
+                continue
+            for tx in month.transactions:
+                if tx.is_credit:
+                    continue
+                if tx.category in DEBT_CATEGORIES:
+                    bucket = LOAN_BUCKET
+                elif tx.category in MOVEMENT_CATEGORIES:
+                    if (ledger.account_number, tx.post_date, str(tx.amount), tx.description) in matched_keys:
+                        continue
+                    bucket = OUTSIDE_TRANSFER_BUCKET
+                else:
+                    bucket = tx.category or "Other"
+                totals[bucket] += tx.amount
+                months_used[bucket] |= full
+    scheduled: dict[str, Decimal] = defaultdict(Decimal)
+    for r in repeating:
+        if r.income or not r.active or r.cadence_days <= 0:
+            continue
+        bucket = LOAN_BUCKET if r.category in DEBT_CATEGORIES else (r.category or "Other")
+        scheduled[bucket] += r.typical_amount * Decimal("30.44") / Decimal(r.cadence_days)
+    baselines = [
+        OutflowBaseline(
+            label=bucket,
+            monthly=(amount / Decimal(len(months_used[bucket]))).quantize(Decimal("0.01"), rounding="ROUND_HALF_UP"),
+            scheduled=scheduled.get(bucket, Decimal("0")).quantize(Decimal("0.01"), rounding="ROUND_HALF_UP"),
+            months=len(months_used[bucket]),
+        )
+        for bucket, amount in totals.items()
+    ]
+    baselines.sort(key=lambda b: b.monthly, reverse=True)
+    return baselines
 
 
 def budget_category_rows(
@@ -595,3 +714,321 @@ def budget_month_rows(
             }
         )
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Subscription review, check register, bill & debt calendar
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SubscriptionRow:
+    payee: str
+    total: Decimal
+    charges: int
+    first_date: datetime.date
+    last_date: datetime.date
+    recent_monthly: Decimal  # average per month over the trailing 90 days
+    next_expected: datetime.date | None
+    cadence_days: int | None
+    accounts: str
+
+
+def subscription_review(
+    result: ConsolidatedResult,
+    repeating: Iterable[RepeatingPayment],
+    as_of: datetime.date,
+) -> list[SubscriptionRow]:
+    """One row per subscription service: what it costs and when it recurs.
+
+    Groups every Subscriptions-category debit by canonical merchant across
+    all accounts (debit card and credit cards alike). ``next_expected`` comes
+    from the recurring detector when the service is an active recurring
+    bill, otherwise from the median gap when at least two charges exist.
+    """
+    groups: dict[str, list[tuple[Transaction, str]]] = defaultdict(list)
+    for ledger in result.ledgers:
+        for tx in ledger.transactions:
+            if tx.is_credit or tx.category != "Subscriptions":
+                continue
+            name = display_merchant(normalize_merchant(tx.description))
+            groups[canon_merchant(name)].append((tx, ledger.label))
+    recurring_by_canon = {
+        canon_merchant(r.payee): r for r in repeating if not r.income and r.category == "Subscriptions"
+    }
+    window_start = as_of - datetime.timedelta(days=90)
+    rows: list[SubscriptionRow] = []
+    for canon, entries in groups.items():
+        txs = [t for t, _ in entries]
+        dates = sorted(_to_date(t.post_date) for t in txs)
+        names = [display_merchant(normalize_merchant(t.description)) for t in txs]
+        recent = [t.amount for t in txs if window_start < _to_date(t.post_date) <= as_of]
+        recent_monthly = (sum(recent, Decimal("0")) / Decimal("3")).quantize(Decimal("0.01"), rounding="ROUND_HALF_UP")
+        rec = recurring_by_canon.get(canon)
+        cadence: int | None = None
+        nxt: datetime.date | None = None
+        if rec is not None and rec.active:
+            cadence = rec.cadence_days
+            nxt = rec.last_date + datetime.timedelta(days=rec.cadence_days)
+        elif len(dates) >= 2:
+            gaps = [(dates[i + 1] - dates[i]).days for i in range(len(dates) - 1)]
+            med = int(median(gaps))
+            if 4 <= med <= 95 and (as_of - dates[-1]).days <= 2 * med:
+                cadence = med
+                nxt = dates[-1] + datetime.timedelta(days=med)
+        while nxt is not None and cadence and nxt <= as_of:
+            nxt += datetime.timedelta(days=cadence)
+        rows.append(
+            SubscriptionRow(
+                payee=best_display_name(names) or canon,
+                total=sum((t.amount for t in txs), Decimal("0")),
+                charges=len(txs),
+                first_date=dates[0],
+                last_date=dates[-1],
+                recent_monthly=recent_monthly,
+                next_expected=nxt,
+                cadence_days=cadence,
+                accounts=", ".join(sorted({lbl[-4:] for _, lbl in entries})),
+            )
+        )
+    rows.sort(key=lambda r: r.total, reverse=True)
+    return rows
+
+
+_CHECK_RE = re.compile(r"\bCHECK\s*#?\s*(\d{3,6})\b", re.IGNORECASE)
+
+
+def load_check_annotations(path: str | Path | None) -> dict[int, dict[str, str]]:
+    """Read checks.yaml: ``{5130: {payee: Landlord, category: Rent, note: ...}}``.
+
+    Returns an empty mapping when the file is absent or malformed.
+    """
+    if not path:
+        return {}
+    p = Path(path)
+    if not p.exists():
+        return {}
+    try:
+        raw = yaml.safe_load(p.read_text(encoding="utf-8"))
+    except yaml.YAMLError:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    source = raw.get("checks", raw)
+    if not isinstance(source, dict):
+        return {}
+    out: dict[int, dict[str, str]] = {}
+    for number, value in source.items():
+        try:
+            key = int(str(number).lstrip("#"))
+        except ValueError:
+            continue
+        if isinstance(value, str):
+            out[key] = {"payee": value}
+        elif isinstance(value, dict):
+            out[key] = {k: str(v) for k, v in value.items() if v is not None}
+    return out
+
+
+def apply_check_annotations(statements: Iterable[Statement], annotations: dict[int, dict[str, str]]) -> int:
+    """Attach payee/purpose to check transactions; returns how many were annotated.
+
+    The check number stays in the description as the payment method
+    ("CHECK # 5130 - Landlord"); the category becomes the purpose when the
+    annotation names one, so spending by category reflects what the check
+    paid for instead of how it was paid.
+    """
+    if not annotations:
+        return 0
+    count = 0
+    for stmt in statements:
+        for tx in stmt.transactions:
+            m = _CHECK_RE.search(tx.description)
+            if not m:
+                continue
+            ann = annotations.get(int(m.group(1)))
+            if not ann:
+                continue
+            payee = ann.get("payee", "")
+            if payee and payee not in tx.description:
+                tx.description = f"{tx.description} \u2013 {payee}"
+            if ann.get("category"):
+                tx.category = ann["category"]
+            count += 1
+    return count
+
+
+@dataclass
+class CheckRow:
+    number: int
+    date: str
+    amount: Decimal
+    payee: str
+    purpose: str
+    account: str
+    source: str
+
+
+def check_register(result: ConsolidatedResult, annotations: dict[int, dict[str, str]]) -> list[CheckRow]:
+    """Every cleared check with its payee/purpose when annotated."""
+    rows: list[CheckRow] = []
+    seen: set[tuple[str, int]] = set()
+    for ledger in result.ledgers:
+        for tx in ledger.transactions:
+            m = _CHECK_RE.search(tx.description)
+            if not m or tx.is_credit:
+                continue
+            number = int(m.group(1))
+            if (ledger.account_number, number) in seen:
+                continue
+            seen.add((ledger.account_number, number))
+            ann = annotations.get(number, {})
+            purpose = ann.get("category") or (tx.category if tx.category != "Checks" else "")
+            stmt = next((s for s in ledger.statements if any(t is tx for t in s.transactions)), None)
+            name = Path(stmt.file_path).name if stmt and stmt.file_path else ""
+            where = f"p.{tx.source_page} row {tx.source_row}" if tx.source_page else ""
+            rows.append(
+                CheckRow(
+                    number=number,
+                    date=tx.post_date,
+                    amount=tx.amount,
+                    payee=ann.get("payee", ""),
+                    purpose=purpose,
+                    account=ledger.label,
+                    source=" ".join(part for part in (name, where) if part),
+                )
+            )
+    rows.sort(key=lambda r: (_to_date(r.date), r.number))
+    return rows
+
+
+@dataclass
+class DebtRow:
+    label: str
+    as_of: str
+    balance: Decimal
+    credit_limit: Decimal
+    apr: Decimal
+    minimum_payment: Decimal
+    due_date: str
+    autopay: bool
+    last_payment_date: str
+    last_payment_amount: Decimal
+
+    @property
+    def utilization(self) -> Decimal | None:
+        if self.credit_limit <= 0:
+            return None
+        return (self.balance / self.credit_limit * Decimal("100")).quantize(Decimal("0.1"))
+
+
+def debt_log(result: ConsolidatedResult) -> list[DebtRow]:
+    """Per card: balance, limit, APR, minimum due and autopay evidence."""
+    rows: list[DebtRow] = []
+    for ledger in result.ledgers:
+        if ledger.account_type != "Credit Card":
+            continue
+        stmt = ledger.last_statement
+        if stmt is None:
+            continue
+        payments = [t for t in ledger.transactions if t.is_credit and t.category in DEBT_CATEGORIES]
+        payments.sort(key=lambda t: _to_date(t.post_date))
+        last = payments[-1] if payments else None
+        autopay = any(
+            m.matched and m.basis == "autopay" and m.to_account == ledger.account_number for m in result.movements
+        ) or any("AUTOPAY" in t.description.upper() for t in payments[-3:])
+        rows.append(
+            DebtRow(
+                label=ledger.label,
+                as_of=stmt.statement_date,
+                balance=stmt.ending_balance,
+                credit_limit=stmt.credit_limit,
+                apr=stmt.apr_purchases,
+                minimum_payment=stmt.minimum_payment,
+                due_date=stmt.payment_due_date,
+                autopay=autopay,
+                last_payment_date=last.post_date if last else "",
+                last_payment_amount=last.amount if last else Decimal("0"),
+            )
+        )
+    return rows
+
+
+@dataclass
+class CalendarItem:
+    when: datetime.date
+    item: str
+    amount: Decimal
+    kind: str  # "Bill", "Card minimum", "Payday (estimated)"
+    status: str
+    basis: str
+
+
+def bill_calendar(
+    result: ConsolidatedResult,
+    repeating: Iterable[RepeatingPayment],
+    estimated_income: Iterable[EstimatedIncome],
+    as_of: datetime.date,
+    days: int = 60,
+) -> list[CalendarItem]:
+    """Dated list of what is expected to leave (and arrive) over ``days``."""
+    horizon = as_of + datetime.timedelta(days=days)
+    items: list[CalendarItem] = []
+    for r in repeating:
+        if not r.active or r.cadence_days <= 0:
+            continue
+        nxt = r.last_date + datetime.timedelta(days=r.cadence_days)
+        while nxt <= as_of:
+            nxt += datetime.timedelta(days=r.cadence_days)
+        while nxt <= horizon:
+            if r.income:
+                items.append(CalendarItem(nxt, r.payee, r.typical_amount, "Payday", "Recurring", "detected schedule"))
+            else:
+                status = "Auto-charge (card/ACH)" if r.category != "Checks" else "Manual"
+                items.append(
+                    CalendarItem(nxt, r.payee, r.typical_amount, "Bill", status, _cadence_words(r.cadence_days))
+                )
+            nxt += datetime.timedelta(days=r.cadence_days)
+    for inc in estimated_income:
+        nxt = inc.next_event
+        while nxt <= horizon:
+            items.append(
+                CalendarItem(
+                    nxt,
+                    f"{display_merchant(inc.payee)} \u2013 estimated",
+                    inc.median_amount,
+                    "Payday (estimated)",
+                    "Estimated",
+                    f"median of last {inc.occurrences} pay dates",
+                )
+            )
+            nxt += datetime.timedelta(days=inc.median_cadence_days)
+    for debt in debt_log(result):
+        if not debt.due_date:
+            continue
+        due = _to_date(debt.due_date)
+        if as_of < due <= horizon:
+            items.append(
+                CalendarItem(
+                    due,
+                    f"{debt.label} \u2013 minimum payment",
+                    debt.minimum_payment,
+                    "Card minimum",
+                    "Autopay detected" if debt.autopay else "Manual \u2013 schedule",
+                    f"statement dated {debt.as_of}",
+                )
+            )
+    items.sort(key=lambda i: (i.when, i.kind, i.item))
+    return items
+
+
+def _cadence_words(days: int) -> str:
+    if 6 <= days <= 8:
+        return "weekly"
+    if 13 <= days <= 15:
+        return "every two weeks"
+    if 27 <= days <= 32:
+        return "monthly"
+    if 85 <= days <= 95:
+        return "quarterly"
+    return f"every {days} days"

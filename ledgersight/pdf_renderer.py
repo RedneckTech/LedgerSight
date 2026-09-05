@@ -271,11 +271,23 @@ class ReportPDF(FPDF):
 
         i = 0
         first = True
+        page_capacity = content_bottom - (self.t_margin + 14)  # fresh page, below the running header
         while i < len(rows):
             if not first:
                 self.add_page()
             if first:
                 if self.get_y() + header_h + heights[i] > content_bottom:
+                    self.add_page()
+                # Keep small tables together: if only a few rows would fit here
+                # but the whole table fits on a fresh page, start it there.
+                fits_here = 0
+                used_probe = 0.0
+                for h in heights:
+                    if self.get_y() + header_h + used_probe + h > content_bottom:
+                        break
+                    used_probe += h
+                    fits_here += 1
+                if 0 < fits_here < len(rows) and fits_here <= 5 and header_h + sum(heights) <= page_capacity:
                     self.add_page()
             elif section_label and self.get_y() + cont_h + header_h + heights[i] > content_bottom:
                 self.add_page()
@@ -290,6 +302,18 @@ class ReportPDF(FPDF):
             if not take:
                 take = [i]
                 cur = i + 1
+            # Orphan control: when only a few rows would spill onto one more
+            # page, tighten this chunk's row spacing (never below 85%) so the
+            # whole remainder fits here instead of stranding 1-3 rows alone.
+            chunk_row_height = row_height
+            remaining = len(rows) - cur
+            if 0 < remaining <= 3:
+                needed = sum(heights[i:])
+                available = content_bottom - (self.get_y() + extra)
+                if needed > 0 and available > 0 and needed * 0.85 <= available:
+                    chunk_row_height = row_height * min(1.0, available / needed)
+                    take = list(range(i, len(rows)))
+                    cur = len(rows)
             if not first and section_label:
                 self.set_font(self.body_font, "I", 7)
                 self.set_text_color(100, 100, 100)
@@ -303,7 +327,7 @@ class ReportPDF(FPDF):
                 header_color,
                 header_font_size,
                 row_font_size,
-                row_height,
+                chunk_row_height,
             )
             self.table_rows_drawn += len(take)
             # _draw_table_section ends with ln(3); measure the last row itself.

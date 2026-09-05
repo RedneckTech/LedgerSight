@@ -17,6 +17,11 @@ class Transaction:
     is_credit: bool
     balance: Decimal
     category: str = ""
+    # Where the row was read from: 1-based PDF page and the row's ordinal
+    # within the statement's activity listing (1 = first row). Zero when the
+    # transaction was synthesised (e.g. a card's interest line).
+    source_page: int = 0
+    source_row: int = 0
 
 
 @dataclass
@@ -42,6 +47,11 @@ class Statement:
     institution: str = ""
     file_path: str = ""
     period_start: str = ""  # MM/DD/YYYY (period begin), when the statement states it
+    # Card-statement terms, when printed (used for the bill & debt calendar).
+    payment_due_date: str = ""  # MM/DD/YYYY
+    minimum_payment: Decimal = Decimal("0")
+    credit_limit: Decimal = Decimal("0")
+    apr_purchases: Decimal = Decimal("0")  # percent, e.g. 30.49
 
     @property
     def month(self) -> int:

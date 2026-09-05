@@ -424,3 +424,279 @@ class TestCategorySpendTotals(unittest.TestCase):
         totals = category_spend_totals(result.ledgers)
         self.assertEqual(totals["Shopping"], Decimal("445.00"))
         self.assertEqual(totals["Subscriptions"], Decimal("15.00"))
+
+
+class TestSameDayPayrollCollapse(unittest.TestCase):
+    def test_two_deposits_on_one_day_are_one_payday(self) -> None:
+        tx = [
+            make_tx("07/28/2026", "RICHERS TRUCKING PAYROLL", "900.00", True, "1.00", "Payroll"),
+            make_tx("08/04/2026", "RICHERS TRUCKING PAYROLL", "950.00", True, "1.00", "Payroll"),
+            make_tx("08/11/2026", "RICHERS TRUCKING PAYROLL", "600.00", True, "1.00", "Payroll"),
+            make_tx("08/11/2026", "RICHERS TRUCKING PAYROLL", "400.00", True, "1.00", "Payroll"),
+            make_tx("08/18/2026", "RICHERS TRUCKING PAYROLL", "1000.00", True, "1.00", "Payroll"),
+            make_tx("08/25/2026", "RICHERS TRUCKING PAYROLL", "870.00", True, "1.00", "Payroll"),
+        ]
+        est = estimate_income_groups(tx, datetime.date(2026, 8, 28))
+        self.assertEqual(len(est), 1)
+        self.assertEqual(est[0].median_cadence_days, 7)  # not 6, despite the double payment
+        self.assertEqual(est[0].occurrences, 5)  # distinct pay dates
+        self.assertEqual(est[0].median_amount, Decimal("950.00"))  # 08/11 counts as one $1,000 payday
+        self.assertEqual(est[0].next_event, datetime.date(2026, 9, 1))
+
+
+def _two_month_result():
+    """Checking statements Jan (full month) and Feb 1-15 (partial) plus a card."""
+    stmts = [
+        make_stmt(
+            "01/31/2026",
+            "XXXXXXXXXXX1234",
+            "1000.00",
+            "1600.00",
+            [
+                make_tx("01/02/2026", "RICHERS TRUCKING PAYROLL", "2000.00", True, "3000.00", "Payroll"),
+                make_tx("01/05/2026", "NETFLIX.COM", "15.00", False, "2985.00", "Subscriptions"),
+                make_tx("01/06/2026", "HULU", "85.00", False, "2900.00", "Subscriptions"),
+                make_tx("01/10/2026", "CAPITAL ONE CRCARDPMT", "300.00", False, "2600.00", "Loan/Credit Payment"),
+                make_tx(
+                    "01/12/2026",
+                    "111111 WEB XFER TO CLASSIC BUSINESS XXXXXX2136 1/12/26",
+                    "500.00",
+                    False,
+                    "2100.00",
+                    "Transfers",
+                ),
+                make_tx("01/20/2026", "CHECK # 5001", "500.00", False, "1600.00", "Checks"),
+            ],
+        ),
+        make_stmt(
+            "02/15/2026",
+            "XXXXXXXXXXX1234",
+            "1600.00",
+            "1585.00",
+            [make_tx("02/05/2026", "NETFLIX.COM", "15.00", False, "1585.00", "Subscriptions")],
+        ),
+        make_stmt(
+            "01/28/2026",
+            "XXXXXXXXXXXX0142",
+            "500.00",
+            "260.00",
+            [
+                make_tx("01/12/2026", "CAPITAL ONE AUTOPAY PYMT", "300.00", True, "200.00", "Loan/Credit Payment"),
+                make_tx("01/15/2026", "LOVE'S #0687", "60.00", False, "260.00", "Fuel"),
+            ],
+            account_type="Credit Card",
+            institution="Capital One",
+        ),
+    ]
+    for s in stmts:
+        s.period_start = {"01/31/2026": "01/01/2026", "02/15/2026": "02/01/2026", "01/28/2026": ""}[s.statement_date]
+    stmts[2].payment_due_date = "02/22/2026"
+    stmts[2].minimum_payment = Decimal("25.00")
+    stmts[2].credit_limit = Decimal("1300.00")
+    stmts[2].apr_purchases = Decimal("30.49")
+    return consolidate(stmts)
+
+
+class TestCoverageAndBaselines(unittest.TestCase):
+    def setUp(self) -> None:
+        self.result = _two_month_result()
+        self.checking = [led for led in self.result.ledgers if led.account_type == "Checking"][0]
+
+    def test_month_completeness(self) -> None:
+        from ledgersight.personal.consolidation import ledger_covers_month, month_fully_covered
+
+        self.assertTrue(month_fully_covered(self.checking, 2026, 1))
+        self.assertFalse(month_fully_covered(self.checking, 2026, 2))  # statement ends 02/15
+        self.assertTrue(ledger_covers_month(self.checking, 2026, 2))
+        self.assertFalse(ledger_covers_month(self.checking, 2026, 3))
+
+    def test_baselines_use_complete_months_only(self) -> None:
+        from ledgersight.personal.insights import LOAN_BUCKET, OUTSIDE_TRANSFER_BUCKET, cash_outflow_baselines
+
+        by_label = {b.label: b for b in cash_outflow_baselines(self.result)}
+        # February (partial) is excluded, so Subscriptions = January only = $100
+        self.assertEqual(by_label["Subscriptions"].monthly, Decimal("100.00"))
+        self.assertEqual(by_label["Subscriptions"].months, 1)
+        self.assertEqual(by_label[LOAN_BUCKET].monthly, Decimal("300.00"))
+        self.assertEqual(by_label[OUTSIDE_TRANSFER_BUCKET].monthly, Decimal("500.00"))
+        self.assertEqual(by_label["Checks"].monthly, Decimal("500.00"))
+
+    def test_scheduled_bills_reduce_allowance(self) -> None:
+        from ledgersight.personal.insights import RepeatingPayment, cash_outflow_baselines
+
+        netflix = RepeatingPayment(
+            payee="NETFLIX.COM",
+            category="Subscriptions",
+            income=False,
+            cadence_days=30,
+            amount_min=Decimal("15.00"),
+            amount_max=Decimal("15.00"),
+            typical_amount=Decimal("15.00"),
+            start_date=datetime.date(2026, 1, 5),
+            last_date=datetime.date(2026, 2, 5),
+            occurrences=2,
+        )
+        subs = [b for b in cash_outflow_baselines(self.result, [netflix]) if b.label == "Subscriptions"][0]
+        self.assertEqual(subs.scheduled, Decimal("15.22"))  # 15 * 30.44 / 30
+        self.assertEqual(subs.allowance, Decimal("84.78"))
+
+    def test_month_series_marks_missing_accounts(self) -> None:
+        series = month_series(self.result.ledgers)
+        feb = series[(2026, 2)]
+        self.assertIn("Capital One ****0142", feb["missing"])  # card statement covers only Jan
+        self.assertIsNone(feb["balances"]["Capital One ****0142"])
+        self.assertEqual(feb["balances"]["First Interstate ****1234"], Decimal("1585.00"))
+        jan = series[(2026, 1)]
+        self.assertEqual(jan["payroll"], Decimal("2000.00"))
+        self.assertEqual(jan["deposits"], Decimal("0"))
+        self.assertEqual(jan["total_credits"], Decimal("2300.00"))  # payroll + card payment credit
+
+    def test_dashboard_payroll_split(self) -> None:
+        totals = dashboard_totals(self.result, datetime.date(2026, 2, 15))
+        self.assertEqual(totals["payroll"], Decimal("2000.00"))
+        self.assertEqual(totals["deposits"], Decimal("0"))
+        self.assertEqual(
+            totals["payroll"]
+            + totals["deposits"]
+            + totals["refunds"]
+            + totals["transfers_in"]
+            + totals["other_credits"],
+            totals["total_credits"],
+        )
+
+
+class TestMovementMatching(unittest.TestCase):
+    def test_autopay_and_reason_for_uncovered_destination(self) -> None:
+        result = _two_month_result()
+        by_desc = {m.description[:20]: m for m in result.movements}
+        card = by_desc["CAPITAL ONE CRCARDPM"]
+        self.assertTrue(card.matched)
+        self.assertEqual(card.basis, "autopay")
+        outside = by_desc["111111 WEB XFER TO C"]
+        self.assertFalse(outside.matched)
+        self.assertIn("****2136", outside.unmatched_reason)
+        self.assertIn("not covered", outside.unmatched_reason)
+
+    def test_amount_date_fallback_recategorizes_teller_transfer(self) -> None:
+        savings = make_stmt(
+            "06/30/2026",
+            "XXXXXXXXXXX3608",
+            "410.00",
+            "400.00",
+            [make_tx("06/24/2026", "MISCELLANEOUS DEBIT", "10.00", False, "400.00", "Other")],
+            account_type="Savings",
+        )
+        checking = make_stmt(
+            "06/26/2026",
+            "XXXXXXXXXXX6781",
+            "75.28",
+            "85.28",
+            [make_tx("06/24/2026", "DEPOSIT", "10.00", True, "85.28", "Deposit")],
+        )
+        result = consolidate([savings, checking])
+        self.assertEqual(len(result.movements), 1)
+        m = result.movements[0]
+        self.assertTrue(m.matched)
+        self.assertEqual(m.basis, "amount+date")
+        self.assertEqual(savings.transactions[0].category, "Transfers")
+        self.assertEqual(checking.transactions[0].category, "Transfers")
+
+    def test_fallback_never_pairs_with_a_different_named_destination(self) -> None:
+        checking = make_stmt(
+            "02/26/2026",
+            "XXXXXXXXXXX6781",
+            "200.00",
+            "100.00",
+            [
+                make_tx(
+                    "02/03/2026",
+                    "130390 WEB XFER TO CLASSIC BUSINESS XXXXXX2136 2/03/26",
+                    "50.00",
+                    False,
+                    "150.00",
+                    "Transfers",
+                ),
+                make_tx(
+                    "02/03/2026",
+                    "130893 WEB XFER TO REGULAR SAVINGS XXXXXX3608 2/03/26",
+                    "50.00",
+                    False,
+                    "100.00",
+                    "Transfers",
+                ),
+            ],
+        )
+        savings = make_stmt(
+            "02/27/2026",
+            "XXXXXXXXXXX3608",
+            "0.00",
+            "50.00",
+            [
+                make_tx(
+                    "02/03/2026",
+                    "130893 WEB XFER FROM BASIC CHECKING XXXXXX6781 2/03/26",
+                    "50.00",
+                    True,
+                    "50.00",
+                    "Transfers",
+                )
+            ],
+            account_type="Savings",
+        )
+        result = consolidate([checking, savings])
+        by_ref = {m.description[:6]: m for m in result.movements}
+        self.assertTrue(by_ref["130893"].matched)
+        self.assertEqual(by_ref["130893"].basis, "reference")
+        self.assertFalse(by_ref["130390"].matched)
+
+
+class TestSubscriptionsChecksDebt(unittest.TestCase):
+    def setUp(self) -> None:
+        self.result = _two_month_result()
+        self.as_of = datetime.date(2026, 2, 15)
+
+    def test_subscription_review_groups_and_totals(self) -> None:
+        from ledgersight.personal.insights import subscription_review
+
+        rows = {r.payee: r for r in subscription_review(self.result, [], self.as_of)}
+        self.assertEqual(rows["NETFLIX.COM"].charges, 2)
+        self.assertEqual(rows["NETFLIX.COM"].total, Decimal("30.00"))
+        self.assertEqual(rows["NETFLIX.COM"].cadence_days, 31)
+        self.assertEqual(rows["NETFLIX.COM"].next_expected, datetime.date(2026, 3, 8))
+        self.assertEqual(rows["HULU"].recent_monthly, Decimal("28.33"))  # 85 / 3 (within 90 days)
+
+    def test_check_annotations(self) -> None:
+        from ledgersight.personal.insights import apply_check_annotations, check_register, load_check_annotations
+
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "checks.yaml"
+            path.write_text("checks:\n  5001:\n    payee: Landlord\n    category: Rent\n")
+            ann = load_check_annotations(path)
+        self.assertEqual(ann[5001]["payee"], "Landlord")
+        statements = self.result.all_statements
+        self.assertEqual(apply_check_annotations(statements, ann), 1)
+        check_tx = [t for t in self.result.all_transactions if "CHECK" in t.description][0]
+        self.assertEqual(check_tx.category, "Rent")
+        self.assertIn("Landlord", check_tx.description)
+        self.assertIn("CHECK # 5001", check_tx.description)
+        rows = check_register(self.result, ann)
+        self.assertEqual(rows[0].number, 5001)
+        self.assertEqual(rows[0].payee, "Landlord")
+        self.assertEqual(rows[0].purpose, "Rent")
+
+    def test_debt_log_and_calendar(self) -> None:
+        from ledgersight.personal.insights import bill_calendar, debt_log
+
+        debts = debt_log(self.result)
+        self.assertEqual(len(debts), 1)
+        d = debts[0]
+        self.assertEqual(d.balance, Decimal("260.00"))
+        self.assertEqual(d.utilization, Decimal("20.0"))
+        self.assertEqual(d.minimum_payment, Decimal("25.00"))
+        self.assertTrue(d.autopay)
+        self.assertEqual(d.last_payment_amount, Decimal("300.00"))
+        items = bill_calendar(self.result, [], [], self.as_of, days=30)
+        minimums = [i for i in items if i.kind == "Card minimum"]
+        self.assertEqual(len(minimums), 1)
+        self.assertEqual(minimums[0].when, datetime.date(2026, 2, 22))
+        self.assertEqual(minimums[0].status, "Autopay detected")
