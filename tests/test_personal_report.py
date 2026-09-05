@@ -8,12 +8,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from ledgersight.personal.categorizer import categorize_transactions
+from ledgersight.personal.consolidation import consolidate
 from ledgersight.personal.models import Statement, Transaction
 from ledgersight.personal.parser import _is_page_artifact  # noqa: F401 (import sanity)
 from ledgersight.personal.report import (
+    _duplicate_detail_rows,
     _mask_desc,
     _reconcile_statements,
     _write_audit_csv,
+    _write_transactions_csv,
     build_category_table_rows,
     build_monthly_table_rows,
     build_top_merchants,
@@ -159,23 +162,61 @@ class TestWriteAuditCsv(unittest.TestCase):
         self.assertTrue(all(line.split(",")[4].startswith("-") for line in debit_lines))
 
 
+class TestWriteTransactionsCsv(unittest.TestCase):
+    def test_deduplicates_and_rows(self) -> None:
+        stmt2 = make_stmt()
+        stmt2.statement_date = "03/31/2026"
+        stmt2.transactions = [
+            make_tx("01/02/2026", "RICHERS TRUCKING PAYROLL", "500.00", True, "600.00"),
+            make_tx("03/05/2026", "WAL-MART STORE", "40.00", False, "750.00"),
+        ]
+        result = consolidate([make_stmt(), stmt2])
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tx.csv"
+            _write_transactions_csv(result, path, mask_personal=True)
+            lines = path.read_text().splitlines()
+        self.assertEqual(lines[0], "Account,Account Type,Date,Description,Category,Amount,Type,Balance")
+        self.assertEqual(len(lines), 6)
+        payroll = [line for line in lines if "RICHERS" in line]
+        self.assertEqual(len(payroll), 1)
+        mask_line = payroll[0]
+        self.assertEqual(mask_line.split(",")[3], "RICHERS TRUCKING PAYROLL")
+
+
+class TestDuplicateDetailRows(unittest.TestCase):
+    def test_marks_overlap_duplicates(self) -> None:
+        stmt2 = make_stmt()
+        stmt2.statement_date = "03/31/2026"
+        stmt2.transactions = [make_tx("01/02/2026", "RICHERS TRUCKING PAYROLL", "500.00", True, "600.00")]
+        result = consolidate([make_stmt(), stmt2])
+        rows = _duplicate_detail_rows(result.ledgers, mask_personal=True)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][1], "03/31/2026")
+        self.assertEqual(rows[0][4], "Credit")
+        self.assertEqual(rows[0][5], "$500.00")
+
+
 class TestGenerateReport(unittest.TestCase):
     def test_generates_pdf_and_audit(self) -> None:
         with TemporaryDirectory() as tmp:
             tmp_p = Path(tmp)
             pdf = tmp_p / "report.pdf"
             csv_path = tmp_p / "report_audit.csv"
+            tx_csv = tmp_p / "report_transactions.csv"
             generate_report(
                 [make_stmt()],
                 pdf,
                 mode="yearly",
                 target_year=2026,
                 audit_path=csv_path,
+                transactions_csv_path=tx_csv,
             )
             self.assertTrue(pdf.exists())
             self.assertGreater(pdf.stat().st_size, 10000)
             self.assertTrue(csv_path.exists())
             self.assertGreater(len(csv_path.read_text().splitlines()), 1)
+            self.assertTrue(tx_csv.exists())
+            self.assertEqual(len(tx_csv.read_text().splitlines()), 5)
 
     def test_multi_account_audit(self) -> None:
         with TemporaryDirectory() as tmp:

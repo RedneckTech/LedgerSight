@@ -23,6 +23,7 @@ CATEGORY_RULES: dict[str, list[str]] = {
         r"WEB XFER",
         r"ZELLE",
         r"PAYPAL INST XFER",
+        r"XXXXXX\d{4}\s+\d{1,2}/\d{1,2}/\d{2}",
     ],
     "Fuel": [
         r"\bPILOT\b",
@@ -167,6 +168,7 @@ CATEGORY_COLORS: dict[str, str] = {
     "Utilities": "#16a085",
     "Auto Care": "#1abc9c",
     "Loan/Credit Payment": "#8e44ad",
+    "Interest": "#e67e22",
     "Bank Fees": "#95a5a6",
     "Checks": "#d35400",
     "Government": "#7f8c8d",
