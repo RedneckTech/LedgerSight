@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime
 
 import matplotlib
 
@@ -241,7 +241,7 @@ def chart_weekly_balance_ledgers(ledgers: list[AccountLedger]) -> io.BytesIO:
     The daily balance of every account is rebuilt from its earliest statement
     start, so overlapping statement windows are not double-counted.
     """
-    from datetime import date, timedelta
+    from datetime import timedelta
 
     from ledgersight.personal.consolidation import _to_date, balance_asof
 
@@ -295,7 +295,7 @@ def chart_weekly_balance_ledgers(ledgers: list[AccountLedger]) -> io.BytesIO:
     )
     ax.set_ylabel("Average Weekly Balance ($)", fontsize=9)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
-    ax.set_title("Weekly Average Balance \u2013 All Covered Accounts", fontsize=11, fontweight="bold")
+    ax.set_title("Weekly Average Balance \u2013 Covered Accounts", fontsize=11, fontweight="bold")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.set_xlim(-0.5, len(points) - 0.5)
@@ -308,8 +308,18 @@ def chart_weekly_balance_ledgers(ledgers: list[AccountLedger]) -> io.BytesIO:
     return buf
 
 
-def chart_daily_balance_ledger_month(ledger: AccountLedger, year: int, month: int) -> io.BytesIO:
-    """Daily balance line chart for a single account during a calendar month."""
+def chart_daily_balance_ledger_month(
+    ledger: AccountLedger,
+    year: int,
+    month: int,
+    first_supported: date | None = None,
+) -> io.BytesIO:
+    """Daily balance line chart for a single account during a calendar month.
+
+    ``first_supported`` is the first day of the month backed by statement
+    coverage; the line starts there instead of at day 1 so unsupported
+    dates are not silently drawn.
+    """
     from datetime import date, timedelta
 
     from ledgersight.personal.consolidation import _to_date, balance_asof
@@ -324,6 +334,10 @@ def chart_daily_balance_ledger_month(ledger: AccountLedger, year: int, month: in
         end = date(year, month + 1, 1) - timedelta(days=1)
     as_of = _to_date(ledger.as_of or ledger.last_tx_date)
     last_day = min(end, as_of)
+    if first_supported is not None:
+        start = max(start, first_supported)
+    if start > last_day:
+        return _empty_png_buf("No data for this month")
 
     day = start
     date_objs: list[date] = []
@@ -335,6 +349,9 @@ def chart_daily_balance_ledger_month(ledger: AccountLedger, year: int, month: in
     if not date_objs:
         return _empty_png_buf("No data for this month")
 
+    title = f"Daily Balance \u2013 {datetime(year, month, 1):%B %Y} \u2013 {_label(ledger)}"
+    if start != date(year, month, 1):
+        title += f" \u2013 from {start:%m/%d}"
     date_nums = mdates.date2num(date_objs)
     fig, ax = plt.subplots(figsize=(9, 2.1))
     ax.plot(
@@ -351,11 +368,7 @@ def chart_daily_balance_ledger_month(ledger: AccountLedger, year: int, month: in
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
     ax.set_ylabel("Balance ($)", fontsize=9)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
-    ax.set_title(
-        f"Daily Balance \u2013 {datetime(year, month, 1):%B %Y} \u2013 {_label(ledger)}",
-        fontsize=11,
-        fontweight="bold",
-    )
+    ax.set_title(title, fontsize=11, fontweight="bold")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     fig.autofmt_xdate(rotation=30, ha="right")
@@ -410,7 +423,7 @@ def chart_category_by_month(statements: list[Statement]) -> io.BytesIO:
     ax.set_ylabel("Amount ($)", fontsize=9)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
     ax.legend(fontsize=6, ncol=2)
-    ax.set_title("Debits by Category per Month", fontsize=11, fontweight="bold")
+    ax.set_title("Debits by Category per Month (Top 8 Categories)", fontsize=11, fontweight="bold")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     fig.tight_layout()
