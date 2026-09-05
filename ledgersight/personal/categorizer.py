@@ -23,7 +23,7 @@ CATEGORY_RULES: dict[str, list[str]] = {
         r"WEB XFER",
         r"ZELLE",
         r"PAYPAL INST XFER",
-        r"XXXXXX\d{4}\s+\d{1,2}/\d{1,2}/\d{2}",
+        r"^XXXXXX\d{4}\s+\d{1,2}/\d{1,2}/\d{2}$",
     ],
     "Fuel": [
         r"\bPILOT\b",
@@ -91,8 +91,6 @@ CATEGORY_RULES: dict[str, list[str]] = {
         r"Oracle America",
         r"AMAZON PRIME",
         r"Prime Video",
-        r"WL STEAM",
-        r"CLOUD FACTORY",
         r"EXPERIAN\b",
         r"SHORTMAX",
         r"\biDrama\b",
@@ -122,6 +120,8 @@ CATEGORY_RULES: dict[str, list[str]] = {
         r"\bNINTENDO\b",
         r"SP\s+OLD\s+90\s+MARKET",
         r"NAME\s+DOT\s+STORE",
+        r"CLOUD FACTORY",
+        r"\bWL STEAM\b",
     ],
     "Auto Care": [
         r"LAZER SPOT",
@@ -190,7 +190,18 @@ SUBSCRIPTION_PRECEDENCE_PATTERNS = [
     r"PAYPAL (?:INST XFER|PURCHASE).*TWITCH",
     r"PAYPAL.*CLOCKWOR",
     r"PAYPAL.*SHRIKELI",
+    r"DASHPASS",
 ]
+
+
+def clean_memo_prefix(description: str) -> str:
+    """Strip a leading First Interstate masked-account memo fragment.
+
+    First Interstate prepends the literal masked account number and post date
+    (``XXXXXX6781 03/24/26``) to merchant memos. The fragment alone must not
+    decide the category, so remove it when real content follows.
+    """
+    return re.sub(r"^XXXXXX\d{4}\s+(?:\d{1,2}/\d{1,2}/\d{2}\s+)+(?=\S)", "", description, flags=re.IGNORECASE)
 
 
 def categorize(description: str) -> str:
@@ -217,9 +228,11 @@ def categorize_transactions(statements: list[Statement]) -> None:
     """Categorize every transaction in place.
 
     Pre-assigned categories (e.g. parser-generated Interest/Fees entries)
-    are preserved.
+    are preserved. A leading ``XXXXXXdddd MM/DD/YY`` memo fragment (First
+    Interstate) is stripped before rules run so it never implies a transfer.
     """
     for stmt in statements:
         for tx in stmt.transactions:
+            tx.description = clean_memo_prefix(tx.description)
             if not tx.category:
                 tx.category = categorize(tx.description)

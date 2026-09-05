@@ -7,14 +7,17 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from ledgersight.personal.categorizer import categorize_transactions
+from ledgersight.personal.categorizer import categorize, categorize_transactions, clean_memo_prefix
 from ledgersight.personal.consolidation import consolidate
 from ledgersight.personal.models import Statement, Transaction
 from ledgersight.personal.parser import _is_page_artifact  # noqa: F401 (import sanity)
 from ledgersight.personal.report import (
+    _cash_and_debt_change,
     _duplicate_detail_rows,
     _mask_desc,
+    _month_first_supported,
     _reconcile_statements,
+    _running_balance_mismatches,
     _write_audit_csv,
     _write_transactions_csv,
     build_category_table_rows,
@@ -145,6 +148,74 @@ class TestMaskDesc(unittest.TestCase):
 
     def test_unchanged(self) -> None:
         self.assertEqual(_mask_desc("AMAZON MKTPL"), "AMAZON MKTPL")
+
+
+class TestMaskMemoPrefix(unittest.TestCase):
+    def test_strips_mask_prefix(self) -> None:
+        self.assertEqual(
+            clean_memo_prefix("XXXXXX3608 2/24/26 CLOUD FACTORY VA BURLINGTON IA 05160363 000641"),
+            "CLOUD FACTORY VA BURLINGTON IA 05160363 000641",
+        )
+
+    def test_keeps_bare_mask(self) -> None:
+        self.assertEqual(clean_memo_prefix("XXXXXX6781 6/28/26"), "XXXXXX6781 6/28/26")
+
+    def test_purchase_not_transfer(self) -> None:
+        self.assertEqual(categorize("XXXXXX3608 8/19/26 LOVE'S #0687 INS SOUTH JACKSON IL"), "Fuel")
+        self.assertEqual(categorize("XXXXXX3608 2/24/26 CLOUD FACTORY VA BURLINGTON IA"), "Shopping")
+        self.assertEqual(categorize("XXXXXX2136 3/23/26 PILOT #0067 CARTERSVILLE GA"), "Fuel")
+        self.assertEqual(categorize("XXXXXX3608 4/24/26 CASEYS #4308 CHARITON IA"), "Fuel")
+
+    def test_bare_mask_is_transfer(self) -> None:
+        self.assertEqual(categorize("XXXXXX6781 6/28/26"), "Transfers")
+
+    def test_subscription_removed_from_restaurants(self) -> None:
+        self.assertEqual(categorize("DD *DOORDASHDASHPASS SAN FRANCISCO CA"), "Subscriptions")
+
+    def test_steam_and_vape_shop_are_shopping(self) -> None:
+        self.assertEqual(categorize("WL STEAM PURCHA SEATTLE WA 10670326 943571"), "Shopping")
+        self.assertEqual(categorize("CLOUD FACTORY VAPES BURLINGTON IA"), "Shopping")
+
+
+class TestRunningBalanceMismatches(unittest.TestCase):
+    def test_detects_printed_vs_recomputed(self) -> None:
+        stmt = make_stmt()
+        stmt.beginning_balance = Decimal("189.25")
+        stmt.transactions = [
+            make_tx("12/20/2025", "FLYING J 737", "11.67", False, "177.58"),
+            make_tx("12/31/2025", "PILOT 1135", "26.43", False, "198.01"),
+        ]
+        result = consolidate([stmt])
+        rows = _running_balance_mismatches(result.ledgers[0])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][3], "198.01")
+        self.assertEqual(rows[0][4], "151.15")
+
+    def test_ignores_rows_within_period(self) -> None:
+        stmt = make_stmt()
+        stmt.period_start = "12/31/2025"
+        result = consolidate([stmt])
+        rows = _running_balance_mismatches(result.ledgers[0])
+        self.assertEqual(rows, [])
+
+
+class TestCashAndDebtChange(unittest.TestCase):
+    def test_splits_cash_and_card(self) -> None:
+        result = consolidate([make_stmt(), make_card_stmt()])
+        cash, debt = _cash_and_debt_change(result.ledgers)
+        self.assertEqual(cash, Decimal("300.00"))
+        self.assertEqual(debt, Decimal("38.88"))
+        self.assertEqual(cash + debt, Decimal("338.88"))
+
+
+class TestMonthFirstSupported(unittest.TestCase):
+    def test_respects_period_start(self) -> None:
+        stmt = make_stmt()
+        stmt.period_start = "12/27/2025"
+        stmt.transactions = [make_tx("12/27/2025", "WAL-MART", "50.00", False, "50.00")]
+        result = consolidate([stmt])
+        first = _month_first_supported(result.ledgers[0], 2025, 12)
+        self.assertEqual(first.isoformat(), "2025-12-27")
 
 
 class TestWriteAuditCsv(unittest.TestCase):

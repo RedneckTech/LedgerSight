@@ -6,6 +6,7 @@ import hashlib
 import io
 import logging
 import os
+import struct
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -46,6 +47,18 @@ def _find_font(name: str) -> str:
     return name
 
 
+def _png_size(buf: io.BytesIO) -> tuple[int | None, int | None]:
+    """Read PNG width/height (in pixels) from an image buffer."""
+    try:
+        data = buf.getvalue()
+        if data[:8] != b"\x89PNG\r\n\x1a\n":
+            return None, None
+        w, h = struct.unpack(">II", data[16:24])
+        return w, h
+    except struct.error, IndexError, ValueError:
+        return None, None
+
+
 class ReportPDF(FPDF):
     """Extended FPDF for business financial reports."""
 
@@ -58,6 +71,8 @@ class ReportPDF(FPDF):
         super().__init__(orientation=orientation, unit="mm", format="A4")
         self._report_title = title
         self.generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+        self.header_extra: str = ""
+        self.chart_note: str = ""
         self.set_auto_page_break(auto=True, margin=18)
         self.set_margins(12, 12, 12)
         self._use_dejavu = False
@@ -91,6 +106,9 @@ class ReportPDF(FPDF):
         title_short = self._report_title[:80]
         self.cell(0, 4, title_short, align="L")
         self.cell(0, 4, f"Page {self.page_no()}", align="R", new_x="LMARGIN", new_y="NEXT")
+        if getattr(self, "header_extra", ""):
+            self.set_font(self.body_font, "I", 7)
+            self.cell(0, 4, self.header_extra[:80], new_x="LMARGIN", new_y="NEXT")
         self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
         self.ln(3)
 
@@ -159,6 +177,35 @@ class ReportPDF(FPDF):
         if col_aligns is None:
             col_aligns = ["L"] * len(headers)
 
+        auto_break = self.auto_page_break
+        self.set_auto_page_break(auto=False)
+        try:
+            self._draw_table_paginated(
+                headers,
+                rows,
+                list(col_widths),
+                list(col_aligns),
+                header_color,
+                section_label,
+                header_font_size,
+                row_font_size,
+                row_height,
+            )
+        finally:
+            self.set_auto_page_break(auto=auto_break, margin=18)
+
+    def _draw_table_paginated(
+        self,
+        headers: list[str],
+        rows: list[list[str]],
+        col_widths: Sequence[float],
+        col_aligns: Sequence[str],
+        header_color: tuple,
+        section_label: str,
+        header_font_size: float,
+        row_font_size: float,
+        row_height: float,
+    ):
         header_h = 6
         min_body_rows = 2
         header_space = header_h + min_body_rows * row_height + 4
@@ -175,38 +222,55 @@ class ReportPDF(FPDF):
                 row_font_size,
                 row_height,
             )
-        else:
-            if self.get_y() + header_space > self.h - self.b_margin:
+            return
+        if self.get_y() + header_space > self.h - self.b_margin:
+            self.add_page()
+
+        remaining = list(rows)
+        first_page = True
+        while remaining:
+            available_space = self.h - self.b_margin - self.get_y() - header_h
+            take: list[list[str]] = []
+            used = 0.0
+            for row in remaining:
+                rh = max((str(c).count("\n") + 1 for c in row), default=1) * row_height
+                if used + rh <= available_space:
+                    take.append(row)
+                    used += rh
+                else:
+                    break
+            if not take:
                 self.add_page()
+                available_space = self.h - self.b_margin - self.get_y() - header_h
+                for row in remaining:
+                    rh = max((str(c).count("\n") + 1 for c in row), default=1) * row_height
+                    if used + rh <= available_space:
+                        take.append(row)
+                        used += rh
+                    else:
+                        break
+            if not take:
+                take = [remaining[0]]
+            chunk = take
+            remaining = remaining[len(take) :]
 
-            remaining = list(rows)
-            first_page = True
-            while remaining:
-                available = int((self.h - self.b_margin - self.get_y() - header_h) / row_height)
-                if available < min_body_rows:
-                    self.add_page()
-                    available = int((self.h - self.b_margin - self.get_y() - header_h) / row_height)
+            if not first_page and section_label:
+                self.set_font(self.body_font, "I", 7)
+                self.set_text_color(100, 100, 100)
+                self.cell(0, 4, f"{section_label} (continued)", new_x="LMARGIN", new_y="NEXT")
+                self.ln(1)
 
-                chunk = remaining[:available]
-                remaining = remaining[available:]
-
-                if not first_page and section_label:
-                    self.set_font(self.body_font, "I", 7)
-                    self.set_text_color(100, 100, 100)
-                    self.cell(0, 4, f"{section_label} (continued)", new_x="LMARGIN", new_y="NEXT")
-                    self.ln(1)
-
-                self._draw_table_section(
-                    headers,
-                    chunk,
-                    col_widths,
-                    col_aligns,
-                    header_color,
-                    header_font_size,
-                    row_font_size,
-                    row_height,
-                )
-                first_page = False
+            self._draw_table_section(
+                headers,
+                chunk,
+                col_widths,
+                col_aligns,
+                header_color,
+                header_font_size,
+                row_font_size,
+                row_height,
+            )
+            first_page = False
 
     def _draw_table_section(
         self,
@@ -233,26 +297,50 @@ class ReportPDF(FPDF):
                 self.set_fill_color(255, 255, 255)
             self.set_text_color(50, 50, 50)
             self.set_font(self.body_font, "", row_font_size)
-            for i, cell_text in enumerate(row):
-                truncated = self.truncate_text(str(cell_text), col_widths[i], row_font_size)
-                self.cell(
-                    col_widths[i],
-                    row_height,
-                    truncated,
-                    border=0,
-                    fill=True,
-                    align=col_aligns[i],
-                )
-            self.ln()
+            cells = [str(cell_text).split("\n") for cell_text in row]
+            max_lines = max(len(lines) for lines in cells)
+            for lines in cells:
+                lines.extend([""] * (max_lines - len(lines)))
+            row_start = self.get_y()
+            for line_idx in range(max_lines):
+                y = row_start + line_idx * row_height
+                for i, lines in enumerate(cells):
+                    text = self.truncate_text(lines[line_idx], col_widths[i], row_font_size)
+                    self.set_xy(self.l_margin + sum(col_widths[:i]), y)
+                    self.cell(
+                        col_widths[i],
+                        row_height,
+                        text,
+                        border=0,
+                        fill=True,
+                        align=col_aligns[i],
+                    )
+            self.set_xy(self.l_margin, row_start + max_lines * row_height)
         self.ln(3)
 
-    def embed_chart(self, buf: io.BytesIO, w: float | None = None):
+    def embed_chart(self, buf: io.BytesIO, w: float | None = None, caption: str = ""):
         if w is None:
             w = self.w - self.l_margin - self.r_margin
-        if self.get_y() + w * 0.5 > self.h - 25:
+        if not caption:
+            if self.get_y() + w * 0.5 > self.h - 25:
+                self.add_page()
+            self.image(buf, x=self.l_margin, w=w)
+            self.ln(3)
+            return
+        pw, ph = _png_size(buf)
+        img_h = (w * ph / pw) if (pw and ph) else w * 0.5
+        available = (self.h - self.b_margin) - self.get_y() - 14
+        if img_h > available and available > 12:
+            w = max(w * available / img_h, 20)
+            img_h = available
+        if self.get_y() + img_h > self.h - 25 - 14:
             self.add_page()
         self.image(buf, x=self.l_margin, w=w)
-        self.ln(3)
+        self.ln(2)
+        self.set_font(self.body_font, "I", 7)
+        self.set_text_color(120, 120, 120)
+        self.multi_cell(0, 3.5, caption)
+        self.ln(2)
 
     def draw_kv_table(
         self,

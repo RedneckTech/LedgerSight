@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -24,6 +24,7 @@ from ledgersight.personal.charts import (
 from ledgersight.personal.consolidation import (
     AccountLedger,
     ConsolidatedResult,
+    MovementMatch,
     _to_date,
     balance_asof,
     consolidate,
@@ -89,6 +90,59 @@ def _ledger_short(ledger: AccountLedger) -> str:
         if ledger.account_number
         else ledger.institution or "Account"
     )
+
+
+def _wrap_desc(desc: str, width_chars: int) -> str:
+    """Insert newlines so the PDF table can wrap long descriptions."""
+    words = desc.split()
+    lines: list[str] = []
+    cur = ""
+    for word in words:
+        trial = f"{cur} {word}".strip()
+        if len(trial) <= width_chars:
+            cur = trial
+        else:
+            if cur:
+                lines.append(cur)
+            while len(word) > width_chars:
+                lines.append(word[:width_chars])
+                word = word[width_chars:]
+            cur = word
+    if cur:
+        lines.append(cur)
+    return "\n".join(lines)
+
+
+def _running_balance_mismatches(ledger: AccountLedger) -> list[list[str]]:
+    """Rows whose printed running balance disagrees with the recomputed one.
+
+    The printed balance column is compared against the recomputed balance from
+    the corrected (date-sorted) ledger sequence. Rows that share their post date
+    with another transaction are skipped, since a by-date balance cannot be
+    attributed to any single one of them.
+    """
+    rows: list[list[str]] = []
+    for stmt in ledger.statements:
+        dated = Counter(tx.post_date for tx in stmt.transactions)
+        for tx in stmt.transactions:
+            if not tx.balance:
+                continue
+            if dated[tx.post_date] != 1:
+                continue
+            recomputed = balance_asof(ledger, _to_date(tx.post_date))
+            if abs(tx.balance - recomputed) > Decimal("0.005"):
+                if abs(recomputed + tx.balance) <= Decimal("0.005"):
+                    continue
+                rows.append(
+                    [
+                        stmt.statement_date,
+                        tx.post_date,
+                        tx.description[:40],
+                        str(tx.balance),
+                        str(recomputed),
+                    ]
+                )
+    return rows
 
 
 def _to_terminal(year: int, month: int) -> date:
@@ -267,10 +321,40 @@ def _ledger_month_statements(ledger: AccountLedger, year: int, month: int) -> li
     ]
 
 
+def _month_first_supported(ledger: AccountLedger, year: int, month: int) -> date:
+    """Earliest day of the month backed by statement coverage for the ledger.
+
+    Uses the statement's printed period start when it is available and falls
+    inside the month; otherwise the first posted transaction of the month.
+    """
+    month_start = date(year, month, 1)
+    month_end = _to_terminal(year, month) - timedelta(days=1)
+    candidates: list[date] = []
+    for stmt in _ledger_month_statements(ledger, year, month):
+        if stmt.period_start:
+            try:
+                p_start = _to_date(stmt.period_start)
+            except ValueError:
+                p_start = None
+            if p_start is not None and month_start <= p_start <= month_end:
+                candidates.append(p_start)
+        tx_dates = [_to_date(t.post_date) for t in stmt.transactions]
+        in_month = [d for d in tx_dates if month_start <= d <= month_end]
+        if in_month:
+            candidates.append(min(in_month))
+    return min(candidates) if candidates else month_start
+
+
 def _period_note(stmt: Statement) -> str:
     if stmt.period_start:
         return f"{stmt.period_start} \u2013 {stmt.statement_date}"
-    return stmt.statement_date
+    if stmt.daily_balances:
+        try:
+            first = min(_to_date(db["date"]) for db in stmt.daily_balances)
+            return f"{first:%m/%d/%Y} \u2013 {stmt.statement_date}"
+        except ValueError:
+            pass
+    return f"{stmt.statement_date} (start date not stated)"
 
 
 def _render_reconciliation(
@@ -403,6 +487,24 @@ def _render_reconciliation(
             row_height=4.5,
         )
 
+    bal_issues = [(led, x) for led in result.ledgers for x in _running_balance_mismatches(led)]
+    if bal_issues:
+        pdf.ln(2)
+        pdf.sub_title("Running Balances \u2013 Printed vs Recomputed")
+        pdf.body_text(
+            "Every transaction table now shows the running balance recomputed from the corrected "
+            "transaction sequence (statement-printed balances are kept in the audit CSV for reference).",
+            size=8,
+        )
+        pdf.draw_table(
+            ["Account", "Statement", "Date", "Description", "Printed", "Computed"],
+            [[_ledger_short(led)] + x for led, x in bal_issues],
+            col_widths=[38, 22, 22, 54, 18, 18],
+            col_aligns=["L", "L", "L", "L", "R", "R"],
+            row_font_size=7,
+            row_height=4.5,
+        )
+
     matched = sum(m.matched for m in result.movements)
     pdf.ln(2)
     pdf.sub_title("Internal Money Movement")
@@ -420,24 +522,58 @@ def _render_reconciliation(
 # ---------------------------------------------------------------------------
 
 
-def _spending_overview(ledgers: list[AccountLedger], total_credits: Decimal, total_debits: Decimal) -> list[list[str]]:
+def _cash_and_debt_change(ledgers: list[AccountLedger]) -> tuple[Decimal, Decimal]:
+    """(Change in cash & savings, reduction in credit-card debt)."""
+    cash_change = Decimal("0")
+    debt_reduction = Decimal("0")
+    for ledger in ledgers:
+        net = sum((t.amount if t.is_credit else -t.amount) for t in ledger.transactions)
+        if "CARD" in ledger.account_type.upper():
+            debt_reduction += net
+        else:
+            cash_change += net
+    return cash_change, debt_reduction
+
+
+def _spending_overview(
+    ledgers: list[AccountLedger],
+    movements: list[MovementMatch],
+    total_credits: Decimal,
+    total_debits: Decimal,
+) -> list[list[str]]:
     """Rows separating debt payments / transfers / spending from total debits."""
-    debt = Decimal("0")
-    transfers = Decimal("0")
+    ledger_by_acct = {led.account_number: led for led in ledgers}
+    debt_total = Decimal("0")
+    transfer_total = Decimal("0")
     for ledger in ledgers:
         for tx in ledger.transactions:
             if tx.is_credit:
                 continue
             if tx.category == DEBT_CATEGORY:
-                debt += tx.amount
+                debt_total += tx.amount
             elif tx.category == TRANSFER_CATEGORY:
-                transfers += tx.amount
-    spending = total_debits - debt - transfers
+                transfer_total += tx.amount
+
+    matched_card = Decimal("0")
+    matched_transfer = Decimal("0")
+    for m in movements:
+        if m.matched:
+            to = ledger_by_acct.get(m.to_account)
+            if to is not None and "CARD" in to.account_type.upper():
+                matched_card += m.amount
+            else:
+                matched_transfer += m.amount
+
+    other_debt = max(debt_total - matched_card, Decimal("0"))
+    unmatched = max(transfer_total - matched_transfer, Decimal("0"))
+    spending = total_debits - debt_total - transfer_total
     return [
         ["Total Credits (all accounts)", str(total_credits)],
         ["Total Debits (all accounts)", str(total_debits)],
-        ["\u2013 Credit-card payments", str(debt)],
-        ["\u2013 Transfers between own accounts", str(transfers)],
+        ["\u2013 Payments to covered credit cards", str(matched_card)],
+        ["\u2013 Other loan/card payments", str(other_debt)],
+        ["\u2013 Internal transfers (matched)", str(matched_transfer)],
+        ["\u2013 Unmatched transfers / outflows", str(unmatched)],
         ["= Spending (all other debits)", str(spending)],
     ]
 
@@ -549,11 +685,14 @@ def generate_report(
     total_credits_val = sum((t.amount for t in result.all_transactions if t.is_credit), Decimal("0"))
     total_debits_val = sum((t.amount for t in result.all_transactions if not t.is_credit), Decimal("0"))
     net_flow = total_credits_val - total_debits_val
+    cash_change, debt_reduction = _cash_and_debt_change(result.ledgers)
 
     summary_rows = [
         ["Total Credits", fmt_dollar(total_credits_val)],
         ["Total Debits", fmt_dollar(total_debits_val)],
-        ["Combined Balance Change", fmt_dollar(net_flow)],
+        ["Change in Cash & Savings", fmt_dollar(cash_change)],
+        ["Credit-Card Debt Reduction", fmt_dollar(debt_reduction)],
+        ["= Change in Cash less Card Debt", fmt_dollar(net_flow)],
     ]
     cw = [pdf.w - pdf.l_margin - pdf.r_margin - 50, 50]
     for label, val in summary_rows:
@@ -563,14 +702,11 @@ def generate_report(
         pdf.cell(cw[0], 7, f"  {label}", fill=True)
         pdf.set_font("DJV", "", 10)
         pdf.cell(cw[1], 7, val, fill=True, align="R", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("DJV", "", 8)
-    pdf.set_text_color(120, 120, 120)
-    pdf.cell(
-        0,
-        7,
-        "Not income or savings: it is the sum of balance changes across the covered accounts.",
-        new_x="LMARGIN",
-        new_y="NEXT",
+    pdf.body_text(
+        "\u201cCash\u201d is checking plus savings; the card-debt reduction is that amount lowered across the "
+        "covered credit-card statements. The two components cover different account periods. This is not "
+        "income or savings: it is the sum of balance changes across the covered accounts.",
+        size=8,
     )
     pdf.ln(3)
 
@@ -578,7 +714,12 @@ def generate_report(
     pdf.sub_title("Where Money Went")
     split_rows = [
         [label, fmt_dollar(Decimal(val))]
-        for label, val in _spending_overview(result.ledgers, total_credits_val, total_debits_val)
+        for label, val in _spending_overview(
+            result.ledgers,
+            result.movements,
+            total_credits_val,
+            total_debits_val,
+        )
     ]
     pdf.draw_table(
         ["Component", "Amount"],
@@ -597,15 +738,15 @@ def generate_report(
         ),
         Decimal("0"),
     )
-    pdf.set_font("DJV", "", 8)
-    pdf.set_text_color(120, 120, 120)
-    pdf.cell(
-        0,
-        7,
-        f"Transfers move money between the covered accounts or to a business account; checks "
-        f"({fmt_dollar(checks_total)}) are a payment method and are included in Spending.",
-        new_x="LMARGIN",
-        new_y="NEXT",
+    pdf.body_text(
+        "\u201cInternal transfers\u201d are Web/Zelle/PayPal transfers matched to a credit on another covered "
+        "account. \u201cPayments to covered credit cards\u201d are debits that offset the \u201cPAYMENT - "
+        "THANK YOU\u201d credits on the Capital One statements. \u201cOther loan/card payments\u201d and "
+        "\u201cUnmatched transfers/outflows\u201d moved money to accounts without statements (Chime, JD Byrider, "
+        "a business checking account) for which underlying spending is not visible. Checks "
+        f"({fmt_dollar(checks_total)}) and other method-based rows remain inside Spending, so the "
+        "spending figure is provisional until those outflows are confirmed.",
+        size=8,
     )
     pdf.ln(3)
 
@@ -649,23 +790,24 @@ def generate_report(
         pdf.add_page(orientation="L")
         pdf.section_title(f"{period_label} \u2013 Credits vs Debits (Calendar Months)")
         chart_buf = chart_credits_vs_debits(aggregated)
-        pdf.embed_chart(chart_buf, w=pdf.w - pdf.l_margin - pdf.r_margin)
-        chart_buf.close()
-        pdf.body_text(
-            "Scope: all covered accounts, duplicates removed, bucketed by transaction post date.",
-            size=8,
+        pdf.embed_chart(
+            chart_buf,
+            w=pdf.w - pdf.l_margin - pdf.r_margin,
+            caption="Scope: all covered accounts, duplicates removed, bucketed by transaction post date.",
         )
+        chart_buf.close()
 
         pdf.add_page(orientation="L")
-        pdf.section_title(f"{period_label} \u2013 Weekly Average Balance, Year to Date")
+        pdf.section_title(f"{period_label} \u2013 Weekly Average Balance")
         weekly_chart = chart_weekly_balance_ledgers(result.ledgers)
-        pdf.embed_chart(weekly_chart, w=pdf.w - pdf.l_margin - pdf.r_margin)
-        weekly_chart.close()
-        pdf.body_text(
-            "Daily balance per account is reconstructed from each statement's beginning balance after "
-            "deduplicating overlaps.",
-            size=8,
+        pdf.embed_chart(
+            weekly_chart,
+            w=pdf.w - pdf.l_margin - pdf.r_margin,
+            caption="Daily balance per account is reconstructed from each statement's beginning balance "
+            "after deduplicating overlaps; the covered period is "
+            f"{cover_start_d:%B %d, %Y} through {cover_end_d:%B %d, %Y}.",
         )
+        weekly_chart.close()
 
         pdf.add_page(orientation="L")
         pdf.section_title(f"{period_label} \u2013 Debits by Category per Month (Calendar Months)")
@@ -711,6 +853,7 @@ def generate_report(
             checks_by_month = _checks_by_month(ledger)
             for month in ledger.months:
                 pdf.add_page()
+                pdf.header_extra = f"{_ledger_short(ledger)} \u2013 {month.label}"
                 pdf.section_title(f"{_ledger_short(ledger)} \u2013 {month.label}")
                 covering = _ledger_month_statements(ledger, month.year, month.month)
                 if covering:
@@ -721,6 +864,8 @@ def generate_report(
                 month_end = _to_terminal(month.year, month.month) - timedelta(days=1)
                 bal_start = balance_asof(ledger, month_start - timedelta(days=1))
                 bal_end = balance_asof(ledger, month_end)
+                as_of = ledger.as_of or ledger.last_tx_date
+                partial = as_of and _to_date(as_of) < month_end
                 summary = [
                     ["Account Type", ledger.account_type or "N/A"],
                     ["Starting Balance", fmt_dollar(bal_start)],
@@ -737,6 +882,17 @@ def generate_report(
                         str(sum(1 for t in month.transactions if not t.is_credit)),
                     ],
                 ]
+                if partial:
+                    summary.append(["Coverage", f"Partial \u2013 data through {as_of}"])
+
+                first_supported = _month_first_supported(ledger, month.year, month.month)
+                if first_supported > month_start:
+                    pdf.chart_note = (
+                        f"Statement coverage begins {first_supported:%B %d, %Y}; earlier dates in the month "
+                        "are not plotted."
+                    )
+                else:
+                    pdf.chart_note = ""
                 pdf.sub_title("Account Summary")
                 pdf.draw_table(
                     ["Metric", "Amount"],
@@ -748,8 +904,13 @@ def generate_report(
                 )
 
                 # Daily balance chart
-                daily_chart = chart_daily_balance_ledger_month(ledger, month.year, month.month)
-                pdf.embed_chart(daily_chart, w=185)
+                daily_chart = chart_daily_balance_ledger_month(
+                    ledger,
+                    month.year,
+                    month.month,
+                    first_supported=first_supported,
+                )
+                pdf.embed_chart(daily_chart, w=185, caption=pdf.chart_note)
                 daily_chart.close()
 
                 # Category breakdown
@@ -797,8 +958,14 @@ def generate_report(
                     reverse=True,
                 )
                 shown = sorted_tx[:40]
+                csv_ref = ""
+                if transactions_csv_path:
+                    csv_ref = (
+                        f" All transactions from every covered account are in "
+                        f"{Path(transactions_csv_path).name}, saved next to this report."
+                    )
                 pdf.body_text(
-                    f"Showing {len(shown)} of {len(month.transactions)} transactions (export CSV for the full list).",
+                    f"Showing {len(shown)} of {len(month.transactions)} transactions for this account-month.{csv_ref}",
                     size=8,
                 )
                 tx_rows = []
@@ -811,13 +978,13 @@ def generate_report(
                     tx_rows.append(
                         [
                             tx.post_date,
-                            desc,
+                            _wrap_desc(desc, 30),
                             tx.category[:18],
                             f"{sign}{fmt_dollar(tx.amount)}",
-                            fmt_dollar(tx.balance) if tx.balance is not None else "",
+                            fmt_dollar(balance_asof(ledger, _to_date(tx.post_date))),
                         ]
                     )
-                cw_tx = [22, 60, 30, 26, 26]
+                cw_tx = [22, 66, 26, 26, 26]
                 pdf.draw_table(
                     ["Date", "Description", "Category", "Amount", "Balance"],
                     tx_rows,

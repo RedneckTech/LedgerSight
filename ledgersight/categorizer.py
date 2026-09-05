@@ -9,6 +9,12 @@ from ledgersight.models import CategoryRule, Statement, Transaction
 
 logger = logging.getLogger("ledgersight.categorizer")
 
+_US_STATES = (
+    r"(?:AK|AL|AR|AZ|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|"
+    r"MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|"
+    r"VA|VT|WA|WI|WV|WY)"
+)
+
 _INCOME_CATEGORIES: dict[str, list[str]] = {
     "Sales Revenue": [
         r"\bINVOICE\b",
@@ -519,6 +525,14 @@ def normalize_merchant(description: str) -> str:
     # pdftotext column bleed: trailing masked-card / zip fragments
     desc = re.sub(r"\s+XX\d{4}\s*$", "", desc)
     desc = re.sub(r"\s+\d{5,6}\s*$", "", desc)
+    # leading reference bleed: "CITY ST <ref digits>" glued before the merchant
+    # (e.g. "MOUNTAIN VIEW CA 63632322 545395 125 S ROOSEVELT ..."). Restricted
+    # to real state codes and runs of >=6 digits so merchant names are untouched.
+    desc = re.sub(
+        rf"^[A-Z][A-Z .&'#-]{{1,}}\s+{_US_STATES}\s+\d{{6,}}(?:\s+\d{{1,7}})?\s+(?=[A-Z0-9])",
+        "",
+        desc,
+    )
     # leading bleed tokens before a real merchant name (e.g. "ADA0 ALLIANT")
     desc = re.sub(r"^\d{1,7}\s+", "", desc)
     desc = re.sub(r"^[A-Z]{2,6}\d{1,2}\s+(?=[A-Z][A-Z .#&-]{2,})", "", desc)
