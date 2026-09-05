@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -27,7 +29,10 @@ SCENARIOS = [
 
 QUARTERS = [
     ("All (yearly)", 0),
-    ("Q1", 1), ("Q2", 2), ("Q3", 3), ("Q4", 4),
+    ("Q1", 1),
+    ("Q2", 2),
+    ("Q3", 3),
+    ("Q4", 4),
 ]
 
 
@@ -60,10 +65,10 @@ class ReportConfigScreen(Screen[None]):
                 yield Input(id="month", value="0")
             with Horizontal(classes="config-row"):
                 yield Label("Quarter:", classes="config-label")
-                yield Select(*QUARTERS, id="quarter")
+                yield Select(QUARTERS, id="quarter", value=0, allow_blank=False)
             with Horizontal(classes="config-row"):
                 yield Label("Mode:", classes="config-label")
-                yield Select(*MODES, id="mode", value="combined")
+                yield Select(MODES, id="mode", value="combined", allow_blank=False)
             with Horizontal(classes="config-row"):
                 yield Label("Projections:", classes="config-label")
                 yield Switch(id="projections", value=False)
@@ -81,7 +86,7 @@ class ReportConfigScreen(Screen[None]):
                 yield Switch(id="mask_personal", value=False)
             with Horizontal(classes="config-row"):
                 yield Label("Scenario:", classes="config-label")
-                yield Select(*SCENARIOS, id="scenario", value="base")
+                yield Select(SCENARIOS, id="scenario", value="base", allow_blank=False)
             with Horizontal():
                 yield Button("Back", id="btn-back")
                 yield Button("Generate Report", id="btn-next", variant="success")
@@ -103,25 +108,25 @@ class ReportConfigScreen(Screen[None]):
         try:
             year = int(self.query_one("#year", Input).value or "0")
             month_val = int(self.query_one("#month", Input).value or "0")
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             self.notify("Year and month must be numbers", severity="error")
             return
 
-        if month_val > 0 and int(self.query_one("#quarter", Select).value or 0) > 0:
+        quarter_val = cast(int, self.query_one("#quarter", Select).value)
+        if month_val > 0 and quarter_val > 0:
             self.notify("Cannot select both month and quarter", severity="error")
             return
 
         app.state.report_year = year
         app.state.report_month = month_val if month_val > 0 else None
-        quarter_val = self.query_one("#quarter", Select).value
-        app.state.report_quarter = int(quarter_val) if quarter_val and int(quarter_val) > 0 else None
-        app.state.report_mode = self.query_one("#mode", Select).value or "combined"
+        app.state.report_quarter = quarter_val if quarter_val > 0 else None
+        app.state.report_mode = cast(str, self.query_one("#mode", Select).value)
         app.state.do_projections = self.query_one("#projections", Switch).value
         app.state.export_audit = self.query_one("#export_audit", Switch).value
         app.state.export_pl = self.query_one("#export_pl", Switch).value
         app.state.export_cpa = self.query_one("#export_cpa", Switch).value
         app.state.mask_personal = self.query_one("#mask_personal", Switch).value
-        app.state.scenario = self.query_one("#scenario", Select).value or "base"
+        app.state.scenario = cast(str, self.query_one("#scenario", Select).value)
         await app.goto_screen("generate")
 
     @on(Button.Pressed, "#btn-back")

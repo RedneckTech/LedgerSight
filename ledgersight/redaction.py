@@ -1,4 +1,5 @@
 """Data redaction / masking for personal information."""
+
 from __future__ import annotations
 
 import re
@@ -11,16 +12,19 @@ class DataRedactor:
     and file paths are replaced with generic placeholders.
     """
 
-    _PHONE_RE = re.compile(r'\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}')
-    _EMAIL_RE = re.compile(r'[\w.+-]+@[\w-]+\.[\w.-]+')
-    _ACCOUNT_RE = re.compile(r'X{4,}\d{0,4}')
+    _PHONE_RE = re.compile(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
+    _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+    _ACCOUNT_RE = re.compile(r"X{4,}\d{0,4}")
 
-    def __init__(self, mask_personal: bool = False,
-                 redact_names: list[str] | None = None,
-                 redact_addresses: list[str] | None = None,
-                 redact_paths: list[str] | None = None,
-                 redact_phone_numbers: bool = True,
-                 redact_email: bool = True):
+    def __init__(
+        self,
+        mask_personal: bool = False,
+        redact_names: list[str] | None = None,
+        redact_addresses: list[str] | None = None,
+        redact_paths: list[str] | None = None,
+        redact_phone_numbers: bool = True,
+        redact_email: bool = True,
+    ):
         self.mask_personal = mask_personal
         self.redact_phone_numbers = redact_phone_numbers
         self.redact_email = redact_email
@@ -51,7 +55,9 @@ class DataRedactor:
         # Generic address pattern (123 Main St, etc.)
         value = re.sub(
             r"\b\d+\s+(?:[NSEW]\s+)?[A-Z0-9.'-]+(?:\s+[A-Z0-9.'-]+){0,4}\s+(?:RD|ROAD|ST|STREET|AVE|AVENUE|DR|DRIVE|LN|LANE|WAY|BLVD|BOULEVARD)\b",
-            "[ADDRESS REDACTED]", value, flags=re.IGNORECASE,
+            "[ADDRESS REDACTED]",
+            value,
+            flags=re.IGNORECASE,
         )
         # Replace known names with pseudonyms
         for i, pat in enumerate(self._name_patterns):

@@ -25,16 +25,19 @@ if TYPE_CHECKING:
     from ledgersight.business.pl import ProfitAndLoss
     from ledgersight.business.projections import ProjectionResult
     from ledgersight.models import BusinessConfig, ReconciliationResult, Statement
+    from ledgersight.personal.models import Statement as PersonalStatement
 
 
 @dataclass
 class AppState:
     """Shared application state passed between screens."""
 
+    profile: str = "business"
     config: BusinessConfig | None = None
     config_path: Path | None = None
     data_dir: str = "data/business"
     statements: list[Statement] = field(default_factory=list)
+    personal_statements: list[PersonalStatement] = field(default_factory=list)
     recon_results: list[ReconciliationResult] = field(default_factory=list)
     all_reconciled: bool = False
     pl: ProfitAndLoss | None = None
@@ -63,6 +66,11 @@ WIZARD_ORDER = [
     "generate",
 ]
 
+PERSONAL_WIZARD_ORDER = [
+    "welcome",
+    "personal_report",
+]
+
 SIDEBAR_LABELS: dict[str, str] = {
     "welcome": "Welcome",
     "config_editor": "Config Editor",
@@ -72,6 +80,11 @@ SIDEBAR_LABELS: dict[str, str] = {
     "generate": "Generate Report",
     "txn_browser": "Browse Transactions",
     "pl_overview": "P&L Overview",
+}
+
+PERSONAL_SIDEBAR_LABELS: dict[str, str] = {
+    "welcome": "Welcome",
+    "personal_report": "Personal Report",
 }
 
 
@@ -172,11 +185,22 @@ class LedgerSightApp(App[None]):
     TITLE = "LedgerSight"
     SUB_TITLE = "Financial Report Generator"
 
-    def __init__(self) -> None:
+    def __init__(self, profile: str = "business") -> None:
         super().__init__()
-        self.state = AppState()
+        self.state = AppState(
+            profile=profile,
+            data_dir="data/Personal" if profile == "personal" else "data/business",
+        )
         self._current_wizard = 0
         self._sidebar_visible = False
+
+    @property
+    def _wizard_order(self) -> list[str]:
+        return PERSONAL_WIZARD_ORDER if self.state.profile == "personal" else WIZARD_ORDER
+
+    @property
+    def _sidebar_labels(self) -> dict[str, str]:
+        return PERSONAL_SIDEBAR_LABELS if self.state.profile == "personal" else SIDEBAR_LABELS
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -193,52 +217,64 @@ class LedgerSightApp(App[None]):
         self.sidebar_list = self.query_one(ListView)
         self.content = self.query_one(ContentArea)
 
-        for screen_id, label in SIDEBAR_LABELS.items():
+        for screen_id, label in self._sidebar_labels.items():
             self.sidebar_list.append(NavItem(screen_id, label))
 
-        await self.push_screen("welcome")
+        await self.show_screen("welcome")
 
     # ------------------------------------------------------------------
     # Screen management
     # ------------------------------------------------------------------
 
-    async def push_screen(self, screen_id: str) -> None:
+    async def show_screen(self, screen_id: str) -> None:
         """Push a named screen onto the content area."""
         self._update_sidebar_highlight(screen_id)
         if screen_id == "welcome":
             from ledgersight.tui.screens.welcome import WelcomeScreen
+
             await super().push_screen(WelcomeScreen())
         elif screen_id == "config_editor":
             from ledgersight.tui.screens.config_editor import ConfigEditorScreen
+
             await super().push_screen(ConfigEditorScreen())
         elif screen_id == "statements":
             from ledgersight.tui.screens.statements import StatementsScreen
+
             await super().push_screen(StatementsScreen())
         elif screen_id == "categories":
             from ledgersight.tui.screens.categories import CategoriesScreen
+
             await super().push_screen(CategoriesScreen())
         elif screen_id == "report_config":
             from ledgersight.tui.screens.report_config import ReportConfigScreen
+
             await super().push_screen(ReportConfigScreen())
+        elif screen_id == "personal_report":
+            from ledgersight.tui.screens.personal_report import PersonalReportScreen
+
+            await super().push_screen(PersonalReportScreen())
         elif screen_id == "generate":
             from ledgersight.tui.screens.generate import GenerateScreen
+
             await super().push_screen(GenerateScreen())
         elif screen_id == "txn_browser":
             from ledgersight.tui.screens.txn_browser import TxnBrowserScreen
+
             await super().push_screen(TxnBrowserScreen())
         elif screen_id == "pl_overview":
             from ledgersight.tui.screens.pl_overview import PLOverviewScreen
+
             await super().push_screen(PLOverviewScreen())
 
     def _update_sidebar_highlight(self, screen_id: str) -> None:
-        for i, current_id in enumerate(SIDEBAR_LABELS):
+        for i, current_id in enumerate(self._sidebar_labels):
             if current_id == screen_id:
                 if hasattr(self.sidebar_list, "index"):
                     self.sidebar_list.index = i
                 break
 
     async def goto_screen(self, screen_id: str) -> None:
-        await self.push_screen(screen_id)
+        await self.show_screen(screen_id)
 
     # ------------------------------------------------------------------
     # Actions
@@ -263,7 +299,10 @@ class LedgerSightApp(App[None]):
             await screen.navigate_prev()
 
     async def action_goto_generate(self) -> None:
-        await self.push_screen("generate")
+        if self.state.profile == "personal":
+            await self.show_screen("personal_report")
+        else:
+            await self.show_screen("generate")
 
     # ------------------------------------------------------------------
     # Sidebar click handling
@@ -272,7 +311,7 @@ class LedgerSightApp(App[None]):
     @on(ListView.Selected)
     async def _on_sidebar_select(self, event: ListView.Selected) -> None:
         if isinstance(event.item, NavItem):
-            await self.push_screen(event.item.screen_id)
+            await self.show_screen(event.item.screen_id)
             event.stop()
 
     # ------------------------------------------------------------------
@@ -282,20 +321,19 @@ class LedgerSightApp(App[None]):
     def wizard_next(self, current: str) -> str | None:
         """Return the next screen in wizard order, or None if this is the last."""
         try:
-            idx = WIZARD_ORDER.index(current)
-            return WIZARD_ORDER[idx + 1] if idx + 1 < len(WIZARD_ORDER) else None
+            idx = self._wizard_order.index(current)
+            return self._wizard_order[idx + 1] if idx + 1 < len(self._wizard_order) else None
         except ValueError:
             return None
 
     def wizard_prev(self, current: str) -> str | None:
         """Return the previous screen in wizard order, or None if this is the first."""
         try:
-            idx = WIZARD_ORDER.index(current)
-            return WIZARD_ORDER[idx - 1] if idx > 0 else None
+            idx = self._wizard_order.index(current)
+            return self._wizard_order[idx - 1] if idx > 0 else None
         except ValueError:
             return None
 
 
-def run() -> None:
-    app = LedgerSightApp()
-    app.run()
+def run(profile: str = "business") -> None:
+    LedgerSightApp(profile=profile).run()

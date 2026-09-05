@@ -54,7 +54,7 @@ class TxnBrowserScreen(Screen[None]):
         search = filter_text.lower()
         for stmt in app.state.statements:
             for tx in stmt.transactions:
-                description = tx.description if hasattr(tx, 'description') else tx.original_description
+                description = tx.description if hasattr(tx, "description") else tx.original_description
                 if search and search not in description.lower():
                     continue
                 count += 1
@@ -63,12 +63,16 @@ class TxnBrowserScreen(Screen[None]):
                 table.add_row(
                     tx.post_date,
                     description[:60],
-                    (tx.business_category if hasattr(tx, 'business_category')
-                     else tx.category if hasattr(tx, 'category')
-                     else "?"),
+                    (
+                        tx.business_category
+                        if hasattr(tx, "business_category")
+                        else tx.category
+                        if hasattr(tx, "category")
+                        else "?"
+                    ),
                     f"${tx.amount:,.2f}",
                     "Credit" if tx.is_credit else "Debit",
-                    "Yes" if (hasattr(tx, 'include_in_pnl') and tx.include_in_pnl) else "No",
+                    "Yes" if (hasattr(tx, "include_in_pnl") and tx.include_in_pnl) else "No",
                 )
 
         self.query_one("#search-count", Label).update(

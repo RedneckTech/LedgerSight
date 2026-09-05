@@ -1,10 +1,12 @@
 """PDF report rendering via FPDF."""
+
 from __future__ import annotations
 
 import hashlib
 import io
 import logging
 import os
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -97,8 +99,9 @@ class ReportPDF(FPDF):
         self.set_font(self.body_font, "I", 6)
         self.set_text_color(150, 150, 150)
         self.cell(
-            0, 8,
-            f"Generated {self.generated_at}  |  business_financial_report.py  |  {_SCRIPT_HASH}",
+            0,
+            8,
+            f"Generated {self.generated_at}  |  LedgerSight  |  {_SCRIPT_HASH}",
             align="C",
         )
 
@@ -129,7 +132,7 @@ class ReportPDF(FPDF):
         self.multi_cell(0, 3.5, text)
         self.ln(1)
 
-    def truncate_text(self, text: str, width_mm: float, font_size: int = 7) -> str:
+    def truncate_text(self, text: str, width_mm: float, font_size: float = 7) -> str:
         self.set_font(self.body_font, "", font_size)
         if self.get_string_width(text) <= width_mm:
             return text
@@ -142,12 +145,12 @@ class ReportPDF(FPDF):
         self,
         headers: list[str],
         rows: list[list[str]],
-        col_widths: list[float] | None = None,
-        col_aligns: list[str] | None = None,
+        col_widths: Sequence[float] | None = None,
+        col_aligns: Sequence[str] | None = None,
         header_color: tuple = (44, 62, 80),
         section_label: str = "",
-        header_font_size: int = 7,
-        row_font_size: int = 7,
+        header_font_size: float = 7,
+        row_font_size: float = 7,
         row_height: float = 4.5,
     ):
         if col_widths is None:
@@ -163,8 +166,14 @@ class ReportPDF(FPDF):
         total_space = header_h + len(rows) * row_height + 4
         if self.get_y() + total_space <= self.h - self.b_margin:
             self._draw_table_section(
-                headers, rows, col_widths, col_aligns,
-                header_color, header_font_size, row_font_size, row_height,
+                headers,
+                rows,
+                col_widths,
+                col_aligns,
+                header_color,
+                header_font_size,
+                row_font_size,
+                row_height,
             )
         else:
             if self.get_y() + header_space > self.h - self.b_margin:
@@ -173,14 +182,10 @@ class ReportPDF(FPDF):
             remaining = list(rows)
             first_page = True
             while remaining:
-                available = int(
-                    (self.h - self.b_margin - self.get_y() - header_h) / row_height
-                )
+                available = int((self.h - self.b_margin - self.get_y() - header_h) / row_height)
                 if available < min_body_rows:
                     self.add_page()
-                    available = int(
-                        (self.h - self.b_margin - self.get_y() - header_h) / row_height
-                    )
+                    available = int((self.h - self.b_margin - self.get_y() - header_h) / row_height)
 
                 chunk = remaining[:available]
                 remaining = remaining[available:]
@@ -192,14 +197,27 @@ class ReportPDF(FPDF):
                     self.ln(1)
 
                 self._draw_table_section(
-                    headers, chunk, col_widths, col_aligns,
-                    header_color, header_font_size, row_font_size, row_height,
+                    headers,
+                    chunk,
+                    col_widths,
+                    col_aligns,
+                    header_color,
+                    header_font_size,
+                    row_font_size,
+                    row_height,
                 )
                 first_page = False
 
     def _draw_table_section(
-        self, headers, rows, col_widths, col_aligns,
-        header_color, header_font_size, row_font_size, row_height,
+        self,
+        headers,
+        rows,
+        col_widths,
+        col_aligns,
+        header_color,
+        header_font_size,
+        row_font_size,
+        row_height,
     ):
         self.set_fill_color(*header_color)
         self.set_text_color(255, 255, 255)
@@ -218,8 +236,12 @@ class ReportPDF(FPDF):
             for i, cell_text in enumerate(row):
                 truncated = self.truncate_text(str(cell_text), col_widths[i], row_font_size)
                 self.cell(
-                    col_widths[i], row_height, truncated,
-                    border=0, fill=True, align=col_aligns[i],
+                    col_widths[i],
+                    row_height,
+                    truncated,
+                    border=0,
+                    fill=True,
+                    align=col_aligns[i],
                 )
             self.ln()
         self.ln(3)
@@ -235,8 +257,8 @@ class ReportPDF(FPDF):
     def draw_kv_table(
         self,
         pairs: list[tuple[str, str]],
-        col_widths: list[float] | None = None,
-        font_size: int = 9,
+        col_widths: Sequence[float] | None = None,
+        font_size: float = 9,
     ):
         """Draw a simple key-value table."""
         if col_widths is None:

@@ -1,4 +1,5 @@
 """Business configuration loading from TOML."""
+
 from __future__ import annotations
 
 import logging
@@ -24,7 +25,7 @@ def safe_float_or_none(value: Any) -> float | None:
     """Try to convert *value* to float; return None on failure."""
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -34,27 +35,18 @@ def validate_config(config: BusinessConfig) -> tuple[list[str], list[str]]:
     warnings: list[str] = []
 
     if not isinstance(config.fiscal_year_start, int) or isinstance(config.fiscal_year_start, bool):
-        errors.append(
-            f"fiscal_year_start must be an integer, got {type(config.fiscal_year_start).__name__}"
-        )
+        errors.append(f"fiscal_year_start must be an integer, got {type(config.fiscal_year_start).__name__}")
     elif not 1 <= config.fiscal_year_start <= 12:
         errors.append(f"fiscal_year_start must be 1-12, got {config.fiscal_year_start}")
 
     if config.entity_type not in VALID_ENTITY_TYPES:
-        errors.append(
-            f"entity_type '{config.entity_type}' is not valid; "
-            f"must be one of {sorted(VALID_ENTITY_TYPES)}"
-        )
+        errors.append(f"entity_type '{config.entity_type}' is not valid; must be one of {sorted(VALID_ENTITY_TYPES)}")
 
     if config.accounting_method not in ("cash", "accrual"):
-        errors.append(
-            f"accounting_method must be 'cash' or 'accrual', got '{config.accounting_method}'"
-        )
+        errors.append(f"accounting_method must be 'cash' or 'accrual', got '{config.accounting_method}'")
 
     if not isinstance(config.tax_year, int) or isinstance(config.tax_year, bool):
-        errors.append(
-            f"tax_year must be an integer, got {type(config.tax_year).__name__}"
-        )
+        errors.append(f"tax_year must be an integer, got {type(config.tax_year).__name__}")
     elif not 2000 <= config.tax_year <= 2099:
         errors.append(f"tax_year {config.tax_year} is outside the reasonable range 2000-2099")
 
@@ -69,25 +61,19 @@ def validate_config(config: BusinessConfig) -> tuple[list[str], list[str]]:
         mg = pc.get("monthly_revenue_growth")
         if mg is not None:
             if safe_float_or_none(mg) is None:
-                errors.append(
-                    f"projection_config.monthly_revenue_growth must be a number, got '{mg}'"
-                )
+                errors.append(f"projection_config.monthly_revenue_growth must be a number, got '{mg}'")
 
         for field_name in ("projection_months", "lookback_months"):
             val = pc.get(field_name)
             if val is not None:
                 if not isinstance(val, (int, float)) or isinstance(val, bool) or val <= 0:
-                    errors.append(
-                        f"projection_config.{field_name} must be > 0, got {val}"
-                    )
+                    errors.append(f"projection_config.{field_name} must be > 0, got {val}")
 
         tr = pc.get("tax_reserve_pct")
         if tr is not None:
             f_tr = safe_float_or_none(tr)
             if f_tr is None or not (0 <= f_tr <= 1):
-                errors.append(
-                    f"projection_config.tax_reserve_pct must be between 0 and 1, got {tr}"
-                )
+                errors.append(f"projection_config.tax_reserve_pct must be between 0 and 1, got {tr}")
 
     for i, rule in enumerate(config.custom_rules):
         if rule.direction not in VALID_DIRECTIONS:
@@ -119,11 +105,12 @@ def validate_config_strict(config: BusinessConfig) -> None:
     if errors:
         raise ValueError("Configuration errors:\n" + "\n".join(f"  - {e}" for e in errors))
 
+
 # =============================================================================
 # Example TOML Configuration
 # =============================================================================
 
-EXAMPLE_TOML = '''# Business Financial Report Configuration
+EXAMPLE_TOML = """# Business Financial Report Configuration
 # Placeholder values — replace with your own business data.
 
 [general]
@@ -296,7 +283,7 @@ estimated_tax_confirmations = "not-provided"
 business_license = "not-provided"
 home_office_records = "not-provided"
 health_insurance_docs = "not-provided"
-'''
+"""
 
 
 # =============================================================================
@@ -354,12 +341,19 @@ def load_config(config_path: Path, was_explicit: bool = False, strict: bool = Tr
             tax_cat = rule_data.get("tax_category", "")
             # Derive safe defaults from category/tax names
             is_non_pl = tax_cat == "non-pl" or cat in (
-                "Account Transfer", "Credit Card Payment",
-                "Loan Proceeds", "Loan Principal Payment",
-                "Owner Contribution", "Owner Draw or Distribution",
-                "Fixed Asset Purchase", "Tax Payment",
-                "Refund", "Reimbursement", "Opening Balance",
-                "Uncategorized", "CPA Review Required",
+                "Account Transfer",
+                "Credit Card Payment",
+                "Loan Proceeds",
+                "Loan Principal Payment",
+                "Owner Contribution",
+                "Owner Draw or Distribution",
+                "Fixed Asset Purchase",
+                "Tax Payment",
+                "Refund",
+                "Reimbursement",
+                "Opening Balance",
+                "Uncategorized",
+                "CPA Review Required",
             )
             include_pl = rule_data.get("include_in_pnl", not is_non_pl)
             try:
@@ -367,29 +361,34 @@ def load_config(config_path: Path, was_explicit: bool = False, strict: bool = Tr
             except re.error as exc:
                 logger.error(
                     "Invalid regex pattern in custom rule '%s': %s",
-                    rule_data.get("category", "?"), exc,
+                    rule_data.get("category", "?"),
+                    exc,
                 )
                 raise ConfigurationError(
                     f"Invalid regex pattern in custom rule '{rule_data.get('category', '?')}': {exc}",
                 ) from exc
 
-            config.custom_rules.append(CategoryRule(
-                pattern=rule_data.get("pattern", ""),
-                category=cat,
-                tax_category=tax_cat or "CPA Review",
-                deductibility=rule_data.get("deductibility", "unknown"),
-                is_income=rule_data.get("is_income", False),
-                include_in_pnl=include_pl,
-                is_transfer=rule_data.get("is_transfer", cat in ("Account Transfer", "Credit Card Payment")),
-                is_owner_related=rule_data.get(
-                    "is_owner_related",
-                    cat in ("Owner Contribution", "Owner Draw or Distribution"),
-                ),
-                is_fixed_asset=rule_data.get("is_fixed_asset", cat == "Fixed Asset Purchase"),
-                is_loan=rule_data.get("is_loan", cat in ("Loan Proceeds", "Loan Principal Payment", "Loan Interest")),
-                direction=rule_data.get("direction", "either"),
-                priority=rule_data.get("priority", 0),  # custom rules default higher priority than defaults
-            ))
+            config.custom_rules.append(
+                CategoryRule(
+                    pattern=rule_data.get("pattern", ""),
+                    category=cat,
+                    tax_category=tax_cat or "CPA Review",
+                    deductibility=rule_data.get("deductibility", "unknown"),
+                    is_income=rule_data.get("is_income", False),
+                    include_in_pnl=include_pl,
+                    is_transfer=rule_data.get("is_transfer", cat in ("Account Transfer", "Credit Card Payment")),
+                    is_owner_related=rule_data.get(
+                        "is_owner_related",
+                        cat in ("Owner Contribution", "Owner Draw or Distribution"),
+                    ),
+                    is_fixed_asset=rule_data.get("is_fixed_asset", cat == "Fixed Asset Purchase"),
+                    is_loan=rule_data.get(
+                        "is_loan", cat in ("Loan Proceeds", "Loan Principal Payment", "Loan Interest")
+                    ),
+                    direction=rule_data.get("direction", "either"),
+                    priority=rule_data.get("priority", 0),  # custom rules default higher priority than defaults
+                )
+            )
 
         # Balances
         balances = data.get("balances", {})

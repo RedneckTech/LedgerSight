@@ -1,4 +1,5 @@
 """Shared data models for LedgerSight."""
+
 from __future__ import annotations
 
 import re

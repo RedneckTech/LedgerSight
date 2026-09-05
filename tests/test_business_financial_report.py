@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Comprehensive unit tests for business_financial_report.py.
 
-Run: python3 test_business_financial_report.py
+Run: python3 tests/test_business_financial_report.py
 """
 
-import io
 import os
 import sys
 import tempfile
@@ -12,12 +11,10 @@ import unittest
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import business_financial_report as bfr
-
 
 # =============================================================================
 # Helpers
@@ -192,8 +189,7 @@ class TestCategoryRules(unittest.TestCase):
         # Find first expense and first income rule
         expense_idx = next(i for i, r in enumerate(rules) if r.category == "Fuel")
         income_idx = next(i for i, r in enumerate(rules) if r.is_income)
-        self.assertLess(expense_idx, income_idx,
-                        "Expense rules must come before income rules")
+        self.assertLess(expense_idx, income_idx, "Expense rules must come before income rules")
 
 
 class TestTransactionCategorizer(unittest.TestCase):
@@ -244,8 +240,7 @@ class TestTransactionCategorizer(unittest.TestCase):
     def test_first_match_wins(self):
         """When two rules overlap, the higher-priority (lower number) wins."""
         custom = [
-            bfr.CategoryRule(pattern="PILOT TRAVEL", category="Custom High Priority",
-                            include_in_pnl=True, priority=1),
+            bfr.CategoryRule(pattern="PILOT TRAVEL", category="Custom High Priority", include_in_pnl=True, priority=1),
         ]
         cat = bfr.TransactionCategorizer(custom_rules=custom)
         tx = make_tx(description="PILOT TRAVEL CENTER", is_credit=False, amount="200.00")
@@ -254,9 +249,14 @@ class TestTransactionCategorizer(unittest.TestCase):
 
     def test_owner_contribution_excluded(self):
         custom = [
-            bfr.CategoryRule(pattern="OWNER CONTRIB", category="Owner Contribution",
-                            tax_category="non-pl", is_owner_related=True,
-                            include_in_pnl=False, priority=1),
+            bfr.CategoryRule(
+                pattern="OWNER CONTRIB",
+                category="Owner Contribution",
+                tax_category="non-pl",
+                is_owner_related=True,
+                include_in_pnl=False,
+                priority=1,
+            ),
         ]
         cat = bfr.TransactionCategorizer(custom_rules=custom)
         tx = make_tx(description="OWNER CONTRIB", is_credit=True, amount="5000.00")
@@ -266,9 +266,14 @@ class TestTransactionCategorizer(unittest.TestCase):
 
     def test_fixed_asset_excluded(self):
         custom = [
-            bfr.CategoryRule(pattern="TRUCK PURCHASE", category="Fixed Asset Purchase",
-                            tax_category="non-pl", is_fixed_asset=True,
-                            include_in_pnl=False, priority=1),
+            bfr.CategoryRule(
+                pattern="TRUCK PURCHASE",
+                category="Fixed Asset Purchase",
+                tax_category="non-pl",
+                is_fixed_asset=True,
+                include_in_pnl=False,
+                priority=1,
+            ),
         ]
         cat = bfr.TransactionCategorizer(custom_rules=custom)
         tx = make_tx(description="TRUCK PURCHASE FREIGHTLINER", is_credit=False, amount="50000.00")
@@ -303,12 +308,23 @@ class TestProfitAndLoss(unittest.TestCase):
 
     def test_full_pl_from_transactions(self):
         txs = [
-            make_tx(description="SALE", amount="1000.00", is_credit=True,
-                    business_category="Service Revenue", include_in_pnl=True),
-            make_tx(description="FUEL", amount="200.00", is_credit=False,
-                    business_category="Fuel", include_in_pnl=True),
-            make_tx(description="INSURANCE", amount="150.00", is_credit=False,
-                    business_category="Business Insurance", include_in_pnl=True),
+            make_tx(
+                description="SALE",
+                amount="1000.00",
+                is_credit=True,
+                business_category="Service Revenue",
+                include_in_pnl=True,
+            ),
+            make_tx(
+                description="FUEL", amount="200.00", is_credit=False, business_category="Fuel", include_in_pnl=True
+            ),
+            make_tx(
+                description="INSURANCE",
+                amount="150.00",
+                is_credit=False,
+                business_category="Business Insurance",
+                include_in_pnl=True,
+            ),
         ]
         pl = bfr.build_pl(txs)
         self.assertEqual(pl.total_revenue, Decimal("1000.00"))
@@ -320,10 +336,21 @@ class TestProfitAndLoss(unittest.TestCase):
 
     def test_transfer_excluded_from_pl(self):
         txs = [
-            make_tx(description="SALE", amount="1000.00", is_credit=True,
-                    business_category="Service Revenue", include_in_pnl=True),
-            make_tx(description="TRANSFER", amount="500.00", is_credit=False,
-                    business_category="Account Transfer", include_in_pnl=False, is_transfer=True),
+            make_tx(
+                description="SALE",
+                amount="1000.00",
+                is_credit=True,
+                business_category="Service Revenue",
+                include_in_pnl=True,
+            ),
+            make_tx(
+                description="TRANSFER",
+                amount="500.00",
+                is_credit=False,
+                business_category="Account Transfer",
+                include_in_pnl=False,
+                is_transfer=True,
+            ),
         ]
         pl = bfr.build_pl(txs)
         self.assertEqual(pl.total_revenue, Decimal("1000.00"))
@@ -332,11 +359,21 @@ class TestProfitAndLoss(unittest.TestCase):
 
     def test_owner_contribution_excluded_from_pl(self):
         txs = [
-            make_tx(description="SALE", amount="500.00", is_credit=True,
-                    business_category="Service Revenue", include_in_pnl=True),
-            make_tx(description="OWNER CONTRIB", amount="10000.00", is_credit=True,
-                    business_category="Owner Contribution", include_in_pnl=False,
-                    is_owner_related=True),
+            make_tx(
+                description="SALE",
+                amount="500.00",
+                is_credit=True,
+                business_category="Service Revenue",
+                include_in_pnl=True,
+            ),
+            make_tx(
+                description="OWNER CONTRIB",
+                amount="10000.00",
+                is_credit=True,
+                business_category="Owner Contribution",
+                include_in_pnl=False,
+                is_owner_related=True,
+            ),
         ]
         pl = bfr.build_pl(txs)
         self.assertEqual(pl.total_revenue, Decimal("500.00"))
@@ -344,11 +381,21 @@ class TestProfitAndLoss(unittest.TestCase):
 
     def test_fixed_asset_excluded(self):
         txs = [
-            make_tx(description="SALE", amount="1000.00", is_credit=True,
-                    business_category="Service Revenue", include_in_pnl=True),
-            make_tx(description="TRUCK", amount="30000.00", is_credit=False,
-                    business_category="Fixed Asset Purchase", include_in_pnl=False,
-                    is_fixed_asset=True),
+            make_tx(
+                description="SALE",
+                amount="1000.00",
+                is_credit=True,
+                business_category="Service Revenue",
+                include_in_pnl=True,
+            ),
+            make_tx(
+                description="TRUCK",
+                amount="30000.00",
+                is_credit=False,
+                business_category="Fixed Asset Purchase",
+                include_in_pnl=False,
+                is_fixed_asset=True,
+            ),
         ]
         pl = bfr.build_pl(txs)
         self.assertEqual(pl.total_revenue, Decimal("1000.00"))
@@ -357,11 +404,21 @@ class TestProfitAndLoss(unittest.TestCase):
 
     def test_loan_principal_excluded(self):
         txs = [
-            make_tx(description="SALE", amount="1000.00", is_credit=True,
-                    business_category="Service Revenue", include_in_pnl=True),
-            make_tx(description="LOAN PMT", amount="500.00", is_credit=False,
-                    business_category="Loan Principal Payment", include_in_pnl=False,
-                    is_loan=True),
+            make_tx(
+                description="SALE",
+                amount="1000.00",
+                is_credit=True,
+                business_category="Service Revenue",
+                include_in_pnl=True,
+            ),
+            make_tx(
+                description="LOAN PMT",
+                amount="500.00",
+                is_credit=False,
+                business_category="Loan Principal Payment",
+                include_in_pnl=False,
+                is_loan=True,
+            ),
         ]
         pl = bfr.build_pl(txs)
         self.assertEqual(pl.total_revenue, Decimal("1000.00"))
@@ -370,39 +427,59 @@ class TestProfitAndLoss(unittest.TestCase):
     def test_loan_interest_included_in_expense(self):
         """Loan interest can be included in P&L via custom rules."""
         custom = [
-            bfr.CategoryRule(pattern=r"\bLOAN\s+INTEREST\b",
-                            category="Loan Interest",
-                            tax_category="Interest Expense",
-                            is_loan=True, include_in_pnl=True, priority=1),
+            bfr.CategoryRule(
+                pattern=r"\bLOAN\s+INTEREST\b",
+                category="Loan Interest",
+                tax_category="Interest Expense",
+                is_loan=True,
+                include_in_pnl=True,
+                priority=1,
+            ),
         ]
         cat = bfr.TransactionCategorizer(custom_rules=custom)
-        tx = make_tx(description="LOAN INTEREST PAYMENT", amount="50.00",
-                     is_credit=False)
+        tx = make_tx(description="LOAN INTEREST PAYMENT", amount="50.00", is_credit=False)
         cat.categorize(tx)
-        self.assertTrue(tx.include_in_pnl,
-                        "Loan interest should be included in P&L")
-        self.assertTrue(tx.is_loan,
-                        "Loan interest should be flagged as loan")
+        self.assertTrue(tx.include_in_pnl, "Loan interest should be included in P&L")
+        self.assertTrue(tx.is_loan, "Loan interest should be flagged as loan")
 
 
 class TestProfitAndLossByPeriod(unittest.TestCase):
     def test_monthly_pls(self):
         stmts = [
-            make_stmt(statement_date="01/31/2023",
-                      transactions=[
-                          make_tx(post_date="01/15/2023", description="SALE",
-                                  amount="1000.00", is_credit=True,
-                                  business_category="Service Revenue", include_in_pnl=True),
-                          make_tx(post_date="01/20/2023", description="FUEL",
-                                  amount="200.00", is_credit=False,
-                                  business_category="Fuel", include_in_pnl=True),
-                      ]),
-            make_stmt(statement_date="02/28/2023",
-                      transactions=[
-                          make_tx(post_date="02/15/2023", description="SALE",
-                                  amount="500.00", is_credit=True,
-                                  business_category="Service Revenue", include_in_pnl=True),
-                      ]),
+            make_stmt(
+                statement_date="01/31/2023",
+                transactions=[
+                    make_tx(
+                        post_date="01/15/2023",
+                        description="SALE",
+                        amount="1000.00",
+                        is_credit=True,
+                        business_category="Service Revenue",
+                        include_in_pnl=True,
+                    ),
+                    make_tx(
+                        post_date="01/20/2023",
+                        description="FUEL",
+                        amount="200.00",
+                        is_credit=False,
+                        business_category="Fuel",
+                        include_in_pnl=True,
+                    ),
+                ],
+            ),
+            make_stmt(
+                statement_date="02/28/2023",
+                transactions=[
+                    make_tx(
+                        post_date="02/15/2023",
+                        description="SALE",
+                        amount="500.00",
+                        is_credit=True,
+                        business_category="Service Revenue",
+                        include_in_pnl=True,
+                    ),
+                ],
+            ),
         ]
         pls = bfr.build_monthly_pls(stmts)
         self.assertEqual(len(pls), 2)
@@ -411,18 +488,32 @@ class TestProfitAndLossByPeriod(unittest.TestCase):
 
     def test_quarterly_pls(self):
         stmts = [
-            make_stmt(statement_date="01/31/2023",
-                      transactions=[
-                          make_tx(post_date="01/15/2023", description="SALE",
-                                  amount="1000.00", is_credit=True,
-                                  business_category="Service Revenue", include_in_pnl=True),
-                      ]),
-            make_stmt(statement_date="04/30/2023",
-                      transactions=[
-                          make_tx(post_date="04/15/2023", description="SALE",
-                                  amount="500.00", is_credit=True,
-                                  business_category="Service Revenue", include_in_pnl=True),
-                      ]),
+            make_stmt(
+                statement_date="01/31/2023",
+                transactions=[
+                    make_tx(
+                        post_date="01/15/2023",
+                        description="SALE",
+                        amount="1000.00",
+                        is_credit=True,
+                        business_category="Service Revenue",
+                        include_in_pnl=True,
+                    ),
+                ],
+            ),
+            make_stmt(
+                statement_date="04/30/2023",
+                transactions=[
+                    make_tx(
+                        post_date="04/15/2023",
+                        description="SALE",
+                        amount="500.00",
+                        is_credit=True,
+                        business_category="Service Revenue",
+                        include_in_pnl=True,
+                    ),
+                ],
+            ),
         ]
         qpls = bfr.build_quarterly_pls(stmts)
         self.assertEqual(qpls[(2023, 1)].total_revenue, Decimal("1000.00"))
@@ -491,7 +582,7 @@ class TestReconciliation(unittest.TestCase):
         )
         results, all_ok, forced = bfr.reconcile_all([stmt], allow_mismatch=True)
         self.assertFalse(all_ok)  # genuinely failed
-        self.assertTrue(forced)   # but generation was forced
+        self.assertTrue(forced)  # but generation was forced
 
 
 class TestKPIs(unittest.TestCase):
@@ -502,10 +593,20 @@ class TestKPIs(unittest.TestCase):
                 beginning_balance="1000.00",
                 ending_balance="1200.00",
                 transactions=[
-                    make_tx(description="REV", amount="500.00", is_credit=True,
-                            business_category="Service Revenue", include_in_pnl=True),
-                    make_tx(description="EXP", amount="300.00", is_credit=False,
-                            business_category="Fuel", include_in_pnl=True),
+                    make_tx(
+                        description="REV",
+                        amount="500.00",
+                        is_credit=True,
+                        business_category="Service Revenue",
+                        include_in_pnl=True,
+                    ),
+                    make_tx(
+                        description="EXP",
+                        amount="300.00",
+                        is_credit=False,
+                        business_category="Fuel",
+                        include_in_pnl=True,
+                    ),
                 ],
             ),
         ]
@@ -603,15 +704,21 @@ class TestBusinessConfig(unittest.TestCase):
         )
         masked = config.masked_account()
         self.assertIn("2136", masked)  # last 4 digits preserved
-        self.assertIn("X", masked)    # but preceding digits masked
+        self.assertIn("X", masked)  # but preceding digits masked
 
 
 class TestCSVExports(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        tx = make_tx(description="FUEL PURCHASE", amount="200.00", is_credit=False,
-                     business_category="Fuel", tax_category="Vehicle Fuel",
-                     include_in_pnl=True, deductibility="likely-deductible")
+        tx = make_tx(
+            description="FUEL PURCHASE",
+            amount="200.00",
+            is_credit=False,
+            business_category="Fuel",
+            tax_category="Vehicle Fuel",
+            include_in_pnl=True,
+            deductibility="likely-deductible",
+        )
         stmt = make_stmt(transactions=[tx])
         self.statements = [stmt]
         config = bfr.BusinessConfig(business_name="Test")
@@ -652,6 +759,7 @@ class TestCSVExports(unittest.TestCase):
 
     def tearDown(self):
         import shutil
+
         shutil.rmtree(self.tmpdir)
 
 
@@ -702,27 +810,29 @@ class TestCharts(unittest.TestCase):
         self.assertIsNotNone(buf)
 
     def test_chart_top_vendors(self):
-        stmt = make_stmt(transactions=[
-            make_tx(description="VENDOR A", amount="500.00", is_credit=False,
-                    include_in_pnl=True),
-            make_tx(description="VENDOR B", amount="300.00", is_credit=False,
-                    include_in_pnl=True),
-        ])
+        stmt = make_stmt(
+            transactions=[
+                make_tx(description="VENDOR A", amount="500.00", is_credit=False, include_in_pnl=True),
+                make_tx(description="VENDOR B", amount="300.00", is_credit=False, include_in_pnl=True),
+            ]
+        )
         buf = bfr.chart_top_vendors([stmt])
         self.assertIsNotNone(buf)
 
     def test_chart_top_revenue_sources(self):
-        stmt = make_stmt(transactions=[
-            make_tx(description="CUSTOMER A", amount="1000.00", is_credit=True,
-                    include_in_pnl=True),
-        ])
+        stmt = make_stmt(
+            transactions=[
+                make_tx(description="CUSTOMER A", amount="1000.00", is_credit=True, include_in_pnl=True),
+            ]
+        )
         buf = bfr.chart_top_revenue_sources([stmt])
         self.assertIsNotNone(buf)
 
     def test_chart_projection(self):
         hist = [Decimal("1000"), Decimal("1100")]
         proj = bfr.ProjectionResult(
-            scenario="base", months=3,
+            scenario="base",
+            months=3,
             monthly_revenue=[Decimal("1200"), Decimal("1300"), Decimal("1400")],
             monthly_expenses=[Decimal("700")] * 3,
             monthly_gross_profit=[Decimal("500")] * 3,

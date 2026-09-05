@@ -32,8 +32,7 @@ class TestCategoryRules(unittest.TestCase):
         rules = build_default_rules()
         expense_idx = next(i for i, r in enumerate(rules) if r.category == "Fuel")
         income_idx = next(i for i, r in enumerate(rules) if r.is_income)
-        self.assertLess(expense_idx, income_idx,
-                        "Expense rules must come before income rules")
+        self.assertLess(expense_idx, income_idx, "Expense rules must come before income rules")
 
 
 class TestTransactionCategorizer(unittest.TestCase):
@@ -83,8 +82,7 @@ class TestTransactionCategorizer(unittest.TestCase):
 
     def test_first_match_wins(self):
         custom = [
-            CategoryRule(pattern="PILOT TRAVEL", category="Custom High Priority",
-                            include_in_pnl=True, priority=1),
+            CategoryRule(pattern="PILOT TRAVEL", category="Custom High Priority", include_in_pnl=True, priority=1),
         ]
         cat = TransactionCategorizer(custom_rules=custom)
         tx = make_tx(description="PILOT TRAVEL CENTER", is_credit=False, amount="200.00")
@@ -93,9 +91,14 @@ class TestTransactionCategorizer(unittest.TestCase):
 
     def test_owner_contribution_excluded(self):
         custom = [
-            CategoryRule(pattern="OWNER CONTRIB", category="Owner Contribution",
-                            tax_category="non-pl", is_owner_related=True,
-                            include_in_pnl=False, priority=1),
+            CategoryRule(
+                pattern="OWNER CONTRIB",
+                category="Owner Contribution",
+                tax_category="non-pl",
+                is_owner_related=True,
+                include_in_pnl=False,
+                priority=1,
+            ),
         ]
         cat = TransactionCategorizer(custom_rules=custom)
         tx = make_tx(description="OWNER CONTRIB", is_credit=True, amount="5000.00")
@@ -105,9 +108,14 @@ class TestTransactionCategorizer(unittest.TestCase):
 
     def test_fixed_asset_excluded(self):
         custom = [
-            CategoryRule(pattern="TRUCK PURCHASE", category="Fixed Asset Purchase",
-                            tax_category="non-pl", is_fixed_asset=True,
-                            include_in_pnl=False, priority=1),
+            CategoryRule(
+                pattern="TRUCK PURCHASE",
+                category="Fixed Asset Purchase",
+                tax_category="non-pl",
+                is_fixed_asset=True,
+                include_in_pnl=False,
+                priority=1,
+            ),
         ]
         cat = TransactionCategorizer(custom_rules=custom)
         tx = make_tx(description="TRUCK PURCHASE FREIGHTLINER", is_credit=False, amount="50000.00")
