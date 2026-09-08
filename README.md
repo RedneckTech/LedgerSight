@@ -121,11 +121,19 @@ ledgersight --cli --profile personal -d data/Personal --year 2026 --mode combine
 
 - `--audit` writes `<report>_audit.csv`: every parsed row in statement order
   with the bank-printed balance (`Balance`), the report's recomputed running
-  balance (`Running`), its position in the calculation order (`Seq`) and the
-  exact `Source` (file, PDF page, row).
+  balance (`Running`), its position in the calculation order (`Seq`), the
+  exact `Source` (file, PDF page, row), and an `InReport` flag that shows
+  whether the row falls inside the requested `--year`/`--month`/`--quarter`
+  period (statement closing dates are kept in the audit but may be excluded
+  from period-specific reports).
 - `--csv` writes `<report>_transactions.csv`: the deduplicated ledger in the
   same calculation order the PDF uses (`Seq`), so consecutive-row balance
-  checks hold in the export, with a `Source` reference per row.
+  checks hold in the export, with a `Source` reference per row. CSV cells
+  that could be interpreted as spreadsheet formulas are prefixed so they
+  open as text.
+- `--allow-mismatch` forces report generation when reconciliation fails, but
+  the cover page is marked **UNVALIDATED** and the CLI exits with an error
+  status.
 - Both CSVs are also embedded in the PDF as file attachments.
 - `--budget <path>` enables the Budget vs Actual page (defaults to
   `<directory>/budget.yaml` when that file exists).

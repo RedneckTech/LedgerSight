@@ -77,7 +77,7 @@ def sample_card_statement_text() -> str:
             "$1,133.97",
             "Payments - $100.00",
             "Other Credits $0.00",
-            "Transactions + $61.12",
+            "Transactions + $29.17",
             "Cash Advances + $0.00",
             "Fees Charged + $0.00",
             "Interest Charged + $31.95",
