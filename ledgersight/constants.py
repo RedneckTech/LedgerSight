@@ -45,7 +45,7 @@ VALID_ENTITY_TYPES = {
 
 MONEY_RE = re.compile(
     r"(?P<paren>\()?"
-    r"(?P<minus>-)?"
+    r"(?:(?P<minus>-)\s*)?"
     r"\$(?P<amount>[\d,]+\.\d{2})"
     r"(?(paren)\))"
 )

@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 from decimal import Decimal
 
+from ledgersight.constants import MONEY_RE
 from ledgersight.parsers import _clean_description, parse_amount
 from ledgersight.personal.models import Statement, Transaction
 
@@ -164,7 +165,7 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
         if not in_summary:
             continue
         if "Beginning Balance" in line:
-            m = re.search(r"\$[\d,]+\.\d{2}", line)
+            m = MONEY_RE.search(line)
             if m:
                 beginning_balance = parse_amount(m.group())
             m_start = re.search(r"(\d{2}/\d{2}/\d{4})\s+Beginn", line)
@@ -174,18 +175,18 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
             m = re.search(r"(\d+)\s+Credit", line)
             if m:
                 credit_count = int(m.group(1))
-            m2 = re.search(r"\$[\d,]+\.\d{2}", line)
+            m2 = MONEY_RE.search(line)
             if m2:
                 total_credits = parse_amount(m2.group())
         elif "Debit" in line and "This Period" in line:
             m = re.search(r"(\d+)\s+Debit", line)
             if m:
                 debit_count = int(m.group(1))
-            m2 = re.search(r"\$[\d,]+\.\d{2}", line)
+            m2 = MONEY_RE.search(line)
             if m2:
                 total_debits = parse_amount(m2.group())
         elif "Ending Balance" in line:
-            m = re.search(r"\$[\d,]+\.\d{2}", line)
+            m = MONEY_RE.search(line)
             if m:
                 ending_balance = parse_amount(m.group())
             break
@@ -240,7 +241,7 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
                 pending_below = 0
                 continue
 
-            amounts = list(re.finditer(r"\$[\d,]+\.\d{2}", line))
+            amounts = list(MONEY_RE.finditer(line))
             if not amounts:
                 desc_part = line[date_match.end() :].strip()
                 if desc_part:
@@ -356,7 +357,7 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
             continue
         if "Overdraft" in line or "Total Overdraft Fees" in line:
             break
-        pairs = re.findall(r"(\d{2}/\d{2}/\d{4})\s+(-?\$[\d,]+\.\d{2})", line)
+        pairs = re.findall(r"(\d{2}/\d{2}/\d{4})\s+(-?\s*\$[\d,]+\.\d{2})", line)
         for date_str, amt_str in pairs:
             daily_balances.append({"date": date_str, "balance": parse_amount(amt_str)})
 
@@ -365,11 +366,11 @@ def parse_statement(text: str, file_path: str = "") -> Statement:
     returned_fees = Decimal("0")
     for line in lines:
         if "Total Overdraft Fees" in line:
-            m = re.search(r"\$[\d,]+\.\d{2}", line)
+            m = MONEY_RE.search(line)
             if m:
                 overdraft_fees = parse_amount(m.group())
         if "Total Returned Item Fees" in line:
-            m = re.search(r"\$[\d,]+\.\d{2}", line)
+            m = MONEY_RE.search(line)
             if m:
                 returned_fees = parse_amount(m.group())
 
@@ -413,31 +414,90 @@ def _card_post_date_for(post_date: str, year: int, statement_month: int) -> str:
     A statement closing in January may list transactions from the prior
     December, so when the transaction month falls after the statement
     closing month the transaction belongs to the previous year.
+
+    The year is applied before parsing the day so that leap-day rows on
+    February statements validate against the statement year instead of
+    the 1900 default used by ``strptime`` without a year.
     """
-    parsed = datetime.strptime(post_date.strip(), "%b %d")
-    if parsed.month > statement_month:
-        year -= 1
-    return parsed.replace(year=year).strftime("%m/%d/%Y")
+    month_str, day_str = post_date.strip().split()
+    month = datetime.strptime(month_str, "%b").month
+    effective_year = year - 1 if month > statement_month else year
+    parsed = datetime.strptime(f"{month_str} {day_str} {effective_year}", "%b %d %Y")
+    return parsed.strftime("%m/%d/%Y")
 
 
-def _card_summary_amount(text: str, label: str) -> Decimal:
+def _card_summary_amount(text: str, label: str, absolute: bool = False, window_chars: int = 3000) -> Decimal | None:
     """Find a labeled dollar figure in the account summary section.
 
-    'New Balance' is special: its value sits on the row following the
-    label (the label line also carries the Cash Advances / Minimum
-    Payment columns), so the label line is skipped for it.
+       Returns None when the label is not present so callers can distinguish
+       a missing summary field from a present zero.
+
+       'New Balance' is special: its value sits on the row following the
+       label (the label line also carries the Cash Advances / Minimum
+       Payment columns), so the label line is skipped for it.
+
+       Payment/credit labels are often printed as "Payments - $100.00" even
+       though the amount is a positive credit; set *absolute* to True for
+       those labels to discard the decorative minus sign.
+
+       The search is restricted to the first *window_chars* characters and
+    skips section headers such as "#0142: Payments, Credits and Adjustments"
+       that introduce transaction tables rather than summary totals.
     """
-    idx = text.find(label)
-    if idx < 0:
-        return Decimal("0")
-    window = text[idx : idx + 1000]
-    lines = window.split("\n")
-    start = 1 if label == "New Balance" else 0
-    for line in lines[start:]:
-        m = re.search(r"\$([\d,]+\.\d{2})", line)
-        if m:
-            return parse_amount(m.group(1))
+    search_text = text[:window_chars]
+    start_pos = 0
+    while True:
+        idx = search_text.find(label, start_pos)
+        if idx < 0:
+            return None
+        # Locate the line containing this label.
+        line_start = search_text.rfind("\n", 0, idx) + 1
+        line_end = search_text.find("\n", idx)
+        if line_end < 0:
+            line_end = len(search_text)
+        label_line = search_text[line_start:line_end]
+        # Section headers like "JACOB C PFEIFF #0142: Payments, Credits and
+        # Adjustments" introduce tables, not summary totals.
+        if re.search(r"#\d{4}:\s*", label_line):
+            start_pos = idx + len(label)
+            continue
+        window = search_text[idx : idx + 1000]
+        lines = window.split("\n")
+        # Summary values live on the label line itself (or the next line for
+        # New Balance). Table headers have column headings before any money.
+        start = 1 if label == "New Balance" else 0
+        for line in lines[start : start + 2]:
+            m = MONEY_RE.search(line)
+            if m:
+                val = parse_amount(m.group())
+                return abs(val) if absolute else val
+        start_pos = idx + len(label)
     return Decimal("0")
+
+
+def _card_summary_amount_first(text: str, labels: tuple[str, ...], absolute: bool = False) -> Decimal | None:
+    """Return the first non-None summary amount for any of *labels*."""
+    for label in labels:
+        val = _card_summary_amount(text, label, absolute=absolute)
+        if val is not None:
+            return val
+    return None
+
+
+def _card_summary_amount_sum(text: str, labels: tuple[str, ...], absolute: bool = False) -> Decimal | None:
+    """Sum every present summary amount for *labels*.
+
+    Some statements split payment/credit totals across multiple lines
+    (e.g. "Payments" and "Other Credits"), while others use a single
+    combined line. Summing handles both cases without double-counting
+    missing labels.
+    """
+    total: Decimal | None = None
+    for label in labels:
+        val = _card_summary_amount(text, label, absolute=absolute)
+        if val is not None:
+            total = (total or Decimal("0")) + val
+    return total
 
 
 def load_card_transactions(text: str) -> tuple[list[dict], list[dict]]:
@@ -467,11 +527,14 @@ def load_card_transactions(text: str) -> tuple[list[dict], list[dict]]:
         m = _CARD_ROW_RE.match(stripped)
         if not m:
             continue
+        # Capital One may prefix payment/credit amounts with a minus sign in
+        # the column even though they reduce the balance owed. Store all credit
+        # and debit amounts as positive values; the section determines sign.
         row = {
             "trans_date": m.group(1),
             "post_date": m.group(2),
             "description": " ".join(m.group(3).split()),
-            "amount": parse_amount(m.group(4)),
+            "amount": abs(parse_amount(m.group(4))),
             "page": page,
         }
         if section == "credits":
@@ -529,11 +592,27 @@ def parse_capone_statement(text: str, file_path: str = "") -> Statement:
 
     account_number = f"XXXXXXXXXXXX{last4}" if last4 else ""
 
-    previous_balance = _card_summary_amount(text, "Previous Balance")
-    new_balance = _card_summary_amount(text, "New Balance")
-    cash_advances = _card_summary_amount(text, "Cash Advances")
-    fees = _card_summary_amount(text, "Fees Charged")
-    interest = _card_summary_amount(text, "Interest Charged")
+    previous_balance = _card_summary_amount(text, "Previous Balance") or Decimal("0")
+    new_balance = _card_summary_amount(text, "New Balance") or Decimal("0")
+    cash_advances = _card_summary_amount(text, "Cash Advances") or Decimal("0")
+    fees = _card_summary_amount(text, "Fees Charged") or Decimal("0")
+    interest = _card_summary_amount(text, "Interest Charged") or Decimal("0")
+    # Payments/credits may be labeled several ways across statement variants.
+    # Their labels often carry a decorative minus ("Payments - $100.00") even
+    # though the value is a positive credit, so request the absolute value.
+    # Some statements split the total across "Payments" and "Other Credits",
+    # so sum every present label rather than stopping at the first match.
+    payments_credits = _card_summary_amount_sum(
+        text,
+        (
+            "Payments, Credits and Adjustments",
+            "Payments and Other Credits",
+            "Payments",
+            "Other Credits",
+        ),
+        absolute=True,
+    )
+    transactions_total = _card_summary_amount(text, "Transactions")
     due_date, minimum_payment, credit_limit, apr = _card_terms(text)
 
     creds, purch = load_card_transactions(text)
@@ -608,10 +687,21 @@ def parse_capone_statement(text: str, file_path: str = "") -> Statement:
             balance += tx.amount
         tx.balance = balance
 
-    total_credits = sum((tx.amount for tx in transactions if tx.is_credit), Decimal("0"))
-    total_debits = sum((tx.amount for tx in transactions if not tx.is_credit), Decimal("0"))
-    credit_count = sum(1 for tx in transactions if tx.is_credit)
-    debit_count = sum(1 for tx in transactions if not tx.is_credit)
+    parsed_credits = sum((tx.amount for tx in transactions if tx.is_credit), Decimal("0"))
+    parsed_debits = sum((tx.amount for tx in transactions if not tx.is_credit), Decimal("0"))
+    parsed_credit_count = sum(1 for tx in transactions if tx.is_credit)
+    parsed_debit_count = sum(1 for tx in transactions if not tx.is_credit)
+
+    # Prefer independently parsed summary totals; fall back to computed totals
+    # only when the statement does not print the summary line.
+    total_credits = payments_credits if payments_credits is not None else parsed_credits
+    total_debits = (
+        (transactions_total or Decimal("0")) + cash_advances + fees + interest
+        if transactions_total is not None
+        else parsed_debits
+    )
+    credit_count = parsed_credit_count
+    debit_count = parsed_debit_count
 
     return Statement(
         statement_date=statement_date,

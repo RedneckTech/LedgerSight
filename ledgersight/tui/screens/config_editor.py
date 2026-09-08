@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import os
-import re
+import tomllib
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
+import tomli_w
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
@@ -18,69 +19,89 @@ from ledgersight.tui.app import LedgerSightApp
 
 
 def _save_config_to_toml(config: BusinessConfig, path: Path) -> None:
-    """Write BusinessConfig to a TOML file, preserving existing sections."""
-    general = _build_general_section(config)
-    cpa = _build_cpa_section(config)
-    tail = _extract_tail(path)
+    """Write BusinessConfig to a TOML file, preserving existing sections.
 
+    Uses a proper TOML load/update/dump cycle so rules, aliases,
+    projections, owners, fixed assets, loans, and any unknown sections
+    survive regardless of ordering. The candidate document is validated
+    before it atomically replaces the original file.
+    """
+    data: dict[str, Any] = {}
+    if path.exists():
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+
+    data["general"] = _build_general_dict(config)
+    data["cpa"] = _build_cpa_dict(config)
+    data["owner"] = {"owners": config.owners}
+    if config.projection_config:
+        data["projections"] = config.projection_config
+    if config.custom_rules:
+        data["rules"] = [_rule_to_dict(rule) for rule in config.custom_rules]
+    if config.beginning_balances:
+        data["balances"] = {k: float(v) for k, v in config.beginning_balances.items()}
+    if config.fixed_assets:
+        data["fixed_assets"] = config.fixed_assets
+    if config.loans:
+        data["loans"] = config.loans
+    if config.owner_activities:
+        data["owner_activity"] = config.owner_activities
+    if config.document_checklist:
+        data["document_checklist"] = config.document_checklist
+    if config.merchant_aliases:
+        data["merchant_aliases"] = config.merchant_aliases
+
+    # Validate by re-parsing the generated TOML before replacing the file.
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(general + "\n" + cpa + tail + "\n")
+    with open(tmp, "wb") as f:
+        tomli_w.dump(data, f)
+    with open(tmp, "rb") as f:
+        tomllib.load(f)
     os.replace(str(tmp), str(path))
 
 
-def _build_general_section(config: BusinessConfig) -> str:
-    parts = [
-        "[general]",
-        f'business_name = "{config.business_name}"',
-    ]
-    for field, key in (
-        ("dba", config.dba),
-        ("address", config.address),
-        ("phone", config.phone),
-        ("email", config.email),
-    ):
-        if key:
-            parts.append(f'{field} = "{key}"')
-    parts.append(f"tax_year = {config.tax_year}")
-    parts.append(f"fiscal_year_start = {config.fiscal_year_start}")
-    parts.append(f'entity_type = "{config.entity_type}"')
-    parts.append(f'accounting_method = "{config.accounting_method}"')
-    if config.ein_display:
-        parts.append(f'ein_display = "{config.ein_display}"')
-    parts.append(f"mask_ein = {str(config.mask_ein).lower()}")
-    if config.bank_account_display:
-        parts.append(f'bank_account_display = "{config.bank_account_display}"')
-    parts.append(f"mask_account = {str(config.mask_account).lower()}")
-    if config.industry:
-        parts.append(f'industry = "{config.industry}"')
-    parts.append(f'currency = "{config.currency}"')
-    return "\n".join(parts)
+def _build_general_dict(config: BusinessConfig) -> dict[str, Any]:
+    general: dict[str, Any] = {
+        "business_name": config.business_name,
+        "tax_year": config.tax_year,
+        "fiscal_year_start": config.fiscal_year_start,
+        "entity_type": config.entity_type,
+        "accounting_method": config.accounting_method,
+        "mask_ein": config.mask_ein,
+        "mask_account": config.mask_account,
+        "currency": config.currency,
+    }
+    for field in ("dba", "address", "phone", "email", "ein_display", "bank_account_display", "industry"):
+        value = getattr(config, field)
+        if value:
+            general[field] = value
+    return general
 
 
-def _build_cpa_section(config: BusinessConfig) -> str:
-    parts = [
-        "[cpa]",
-        f'name = "{config.cpa_name}"',
-    ]
-    for field, key in (
-        ("firm", config.cpa_firm),
-        ("email", config.cpa_email),
-        ("phone", config.cpa_phone),
-    ):
-        if key:
-            parts.append(f'{field} = "{key}"')
-    return "\n".join(parts)
+def _build_cpa_dict(config: BusinessConfig) -> dict[str, Any]:
+    cpa: dict[str, Any] = {"name": config.cpa_name}
+    for field in ("firm", "email", "phone"):
+        value = getattr(config, f"cpa_{field}")
+        if value:
+            cpa[field] = value
+    return cpa
 
 
-def _extract_tail(path: Path) -> str:
-    """Extract everything after [cpa] section from existing TOML."""
-    if not path.exists():
-        return ""
-    raw = path.read_text()
-    match = re.search(r"\n\[cpa\].*?(?=\n\[)", raw, re.DOTALL)
-    if not match:
-        return ""
-    return "\n" + raw[match.end() :]
+def _rule_to_dict(rule) -> dict[str, Any]:
+    return {
+        "pattern": rule.pattern,
+        "category": rule.category,
+        "tax_category": rule.tax_category,
+        "deductibility": rule.deductibility,
+        "is_income": rule.is_income,
+        "include_in_pnl": rule.include_in_pnl,
+        "is_transfer": rule.is_transfer,
+        "is_owner_related": rule.is_owner_related,
+        "is_fixed_asset": rule.is_fixed_asset,
+        "is_loan": rule.is_loan,
+        "direction": rule.direction,
+        "priority": rule.priority,
+    }
 
 
 class ConfigEditorScreen(Screen[None]):

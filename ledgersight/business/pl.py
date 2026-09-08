@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
@@ -11,6 +12,15 @@ from ledgersight.models import Statement, Transaction
 from ledgersight.parsers import safe_pct
 
 _AMOUNT_TOLERANCE = Decimal("0.2")
+
+
+@dataclass(frozen=True)
+class ReversalAllocation:
+    """A reversal credit matched to an original debit."""
+
+    debit_idx: int
+    amount: Decimal
+    original_category: str
 
 
 def _find_best_reversal_match(
@@ -38,6 +48,40 @@ def _find_best_reversal_match(
             best = (idx, dt)
 
     return best
+
+
+def build_reversal_allocations(transactions: list[Transaction]) -> dict[int, ReversalAllocation]:
+    """Match Payment Reversal credits to original debits across all periods.
+
+    Each eligible reversal is paired with at most one prior debit by merchant
+    name and amount. The returned mapping ``reversal_idx -> allocation`` lets
+    every period P&L apply the reversal credit against the original debit's
+    category in the reversal's own posting period, so monthly/quarterly P&Ls
+    sum to the aggregate P&L.
+    """
+    debit_by_merchant: dict[str, list[tuple[int, Transaction]]] = {}
+    for idx, tx in enumerate(transactions):
+        if not tx.is_credit and not tx.is_transfer:
+            m = normalize_merchant(tx.description)
+            debit_by_merchant.setdefault(m, []).append((idx, tx))
+
+    matched_debit_indices: set[int] = set()
+    allocations: dict[int, ReversalAllocation] = {}
+
+    for idx, tx in enumerate(transactions):
+        if tx.business_category != "Payment Reversal" or not tx.is_credit:
+            continue
+        merchant = normalize_merchant(tx.description)
+        candidates = [
+            (dt_idx, dt) for dt_idx, dt in debit_by_merchant.get(merchant, []) if dt_idx not in matched_debit_indices
+        ]
+        best = _find_best_reversal_match(tx, candidates) if candidates else None
+        if best is not None:
+            best_idx, best_dt = best
+            matched_debit_indices.add(best_idx)
+            apply_amount = min(tx.amount, best_dt.amount)
+            allocations[id(tx)] = ReversalAllocation(best_idx, apply_amount, best_dt.business_category)
+    return allocations
 
 
 class ProfitAndLoss:
@@ -147,9 +191,24 @@ _INCOME_CAT_SET = set(_INCOME_CATEGORIES.keys()) - _OTHER_INCOME_CATS
 _OP_EXPENSE_CATS = set(_EXPENSE_CATEGORIES.keys()) - _DIRECT_COST_CATS - _OTHER_EXPENSE_CATS
 
 
+def _apply_reversal_to_pl(pl: ProfitAndLoss, allocation: ReversalAllocation) -> None:
+    """Reduce the original debit's category by an allocated reversal amount."""
+    orig_cat = allocation.original_category
+    apply_amount = allocation.amount
+    if orig_cat in _DIRECT_COST_CATS:
+        pl.direct_costs[orig_cat] -= apply_amount
+    elif orig_cat in _OP_EXPENSE_CATS:
+        pl.operating_expenses[orig_cat] -= apply_amount
+    elif orig_cat in _INCOME_CAT_SET:
+        pl.revenue[orig_cat] -= apply_amount
+    else:
+        pl.payment_reversal_credits += apply_amount
+
+
 def build_pl(
     transactions: list[Transaction],
     label: str = "",
+    reversal_allocations: dict[int, ReversalAllocation] | None = None,
 ) -> ProfitAndLoss:
     """Build a P&L from a list of categorized transactions.
 
@@ -158,16 +217,12 @@ def build_pl(
     generic credit/debit totals.
 
     Payment reversals are matched against original debits by merchant
-    name so the corresponding expense category is reduced.
+    name. When ``reversal_allocations`` is provided, the reversal credit
+    reduces the original debit's category in the reversal's own posting
+    period, so aggregate, monthly, and quarterly P&Ls stay consistent.
     """
-    # Pre-build a lookup of debit transactions by merchant for reversal matching
-    debit_by_merchant: dict[str, list[tuple[int, Transaction]]] = {}
-    for idx, tx in enumerate(transactions):
-        if not tx.is_credit and not tx.is_transfer:
-            m = normalize_merchant(tx.description)
-            debit_by_merchant.setdefault(m, []).append((idx, tx))
-
-    matched_debit_indices: set[int] = set()
+    if reversal_allocations is None:
+        reversal_allocations = build_reversal_allocations(transactions)
 
     pl = ProfitAndLoss(label=label)
     for tx in transactions:
@@ -200,27 +255,12 @@ def build_pl(
                 pl.loan_principal_payments += tx.amount
             continue
 
-        # ---- Payment reversals — try to match to original expense ----
+        # ---- Payment reversals — apply in the reversal's own period ----
         if cat == "Payment Reversal" and tx.is_credit:
-            merchant = normalize_merchant(tx.description)
-            candidates = [
-                (idx, dt) for idx, dt in debit_by_merchant.get(merchant, []) if idx not in matched_debit_indices
-            ]
-            best = _find_best_reversal_match(tx, candidates) if candidates else None
-            if best is not None:
-                best_idx, best_dt = best
-                matched_debit_indices.add(best_idx)
-                orig_cat = best_dt.business_category
-                apply_amount = min(tx.amount, best_dt.amount)
-                remainder = tx.amount - apply_amount
-                if orig_cat in _DIRECT_COST_CATS:
-                    pl.direct_costs[orig_cat] -= apply_amount
-                elif orig_cat in _OP_EXPENSE_CATS:
-                    pl.operating_expenses[orig_cat] -= apply_amount
-                elif orig_cat in _INCOME_CAT_SET:
-                    pl.revenue[orig_cat] -= apply_amount
-                else:
-                    pl.payment_reversal_credits += apply_amount
+            alloc = reversal_allocations.get(id(tx))
+            if alloc is not None:
+                _apply_reversal_to_pl(pl, alloc)
+                remainder = tx.amount - alloc.amount
                 if remainder > 0:
                     pl.payment_reversal_credits += remainder
             else:
@@ -278,21 +318,23 @@ def build_pl_by_period(
         for tx in stmt.transactions:
             if period_filter is None or period_filter(tx):
                 tx_list.append(tx)
-    return build_pl(tx_list)
+    allocations = build_reversal_allocations(tx_list)
+    return build_pl(tx_list, reversal_allocations=allocations)
 
 
 def build_monthly_pls(statements: list[Statement]) -> dict[str, ProfitAndLoss]:
     """Build monthly P&L statements keyed by 'YYYY-MM'."""
+    all_tx = [tx for stmt in statements for tx in stmt.transactions]
+    allocations = build_reversal_allocations(all_tx)
     monthly: defaultdict[str, list[Transaction]] = defaultdict(list)
-    for stmt in statements:
-        for tx in stmt.transactions:
-            key = datetime.strptime(tx.post_date, "%m/%d/%Y").strftime("%Y-%m")
-            monthly[key].append(tx)
+    for tx in all_tx:
+        key = datetime.strptime(tx.post_date, "%m/%d/%Y").strftime("%Y-%m")
+        monthly[key].append(tx)
     result = {}
     for key, txs in sorted(monthly.items()):
         yr, mo = key.split("-")
         label = datetime(int(yr), int(mo), 1).strftime("%B %Y")
-        result[key] = build_pl(txs, label=label)
+        result[key] = build_pl(txs, label=label, reversal_allocations=allocations)
     return result
 
 
@@ -304,22 +346,23 @@ def build_quarterly_pls(
 
     *fiscal_year_start* is the calendar month (1-12) that begins the fiscal year.
     """
+    all_tx = [tx for stmt in statements for tx in stmt.transactions]
+    allocations = build_reversal_allocations(all_tx)
     quarterly: dict[tuple[int, int], list[Transaction]] = defaultdict(list)
-    for stmt in statements:
-        for tx in stmt.transactions:
-            parts = tx.post_date.split("/")
-            cal_month = int(parts[0])
-            cal_year = int(parts[2])
-            # Determine fiscal year and fiscal quarter
-            if cal_month >= fiscal_year_start:
-                fy = cal_year
-                fy_month = cal_month - fiscal_year_start + 1
-            else:
-                fy = cal_year - 1
-                fy_month = cal_month + (12 - fiscal_year_start + 1)
-            fq = (fy_month - 1) // 3 + 1
-            quarterly[(fy, fq)].append(tx)
+    for tx in all_tx:
+        parts = tx.post_date.split("/")
+        cal_month = int(parts[0])
+        cal_year = int(parts[2])
+        # Determine fiscal year and fiscal quarter
+        if cal_month >= fiscal_year_start:
+            fy = cal_year
+            fy_month = cal_month - fiscal_year_start + 1
+        else:
+            fy = cal_year - 1
+            fy_month = cal_month + (12 - fiscal_year_start + 1)
+        fq = (fy_month - 1) // 3 + 1
+        quarterly[(fy, fq)].append(tx)
     result: dict[tuple[int, int], ProfitAndLoss] = {}
     for (fy, fq), txs in sorted(quarterly.items()):
-        result[(fy, fq)] = build_pl(txs, label=f"FY{fy} Q{fq}")
+        result[(fy, fq)] = build_pl(txs, label=f"FY{fy} Q{fq}", reversal_allocations=allocations)
     return result

@@ -29,6 +29,7 @@ from ledgersight.personal.report import (
     build_top_merchants,
     generate_report,
 )
+from ledgersight.redaction import DataRedactor
 
 
 def make_tx(
@@ -141,17 +142,20 @@ class TestReconcile(unittest.TestCase):
 
 
 class TestMaskDesc(unittest.TestCase):
+    def _redactor(self, names: list[str] | None = None) -> DataRedactor:
+        return DataRedactor(mask_personal=True, redact_names=names or ["JACOB PFEIFF"])
+
     def test_name(self) -> None:
-        self.assertEqual(_mask_desc("PAYMENT TO JACOB PFEIFF"), "PAYMENT TO [NAME REDACTED]")
+        self.assertEqual(_mask_desc("PAYMENT TO JACOB PFEIFF", self._redactor()), "PAYMENT TO Entity 001")
 
     def test_address(self) -> None:
-        self.assertEqual(_mask_desc("123 MAIN ST"), "[ADDRESS REDACTED]")
+        self.assertEqual(_mask_desc("123 MAIN ST", self._redactor()), "[ADDRESS REDACTED]")
 
     def test_id(self) -> None:
-        self.assertEqual(_mask_desc("XXXXXXXX1234"), "[ID REDACTED]")
+        self.assertEqual(_mask_desc("XXXXXXXX1234", self._redactor()), "[ACCOUNT]")
 
     def test_unchanged(self) -> None:
-        self.assertEqual(_mask_desc("AMAZON MKTPL"), "AMAZON MKTPL")
+        self.assertEqual(_mask_desc("AMAZON MKTPL", self._redactor()), "AMAZON MKTPL")
 
 
 class TestMaskMemoPrefix(unittest.TestCase):
@@ -336,7 +340,8 @@ class TestWriteAuditCsv(unittest.TestCase):
         seq_maps = {id(t): i for i, t in enumerate(ledger.transactions, start=1)}
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "audit.csv"
-            _write_audit_csv([stmt], path, mask_personal=True, run_maps=run_maps, seq_maps=seq_maps)
+            redactor = DataRedactor(mask_personal=True, redact_names=["JACOB PFEIFF"])
+            _write_audit_csv([stmt], path, redactor=redactor, run_maps=run_maps, seq_maps=seq_maps)
             rows = list(csv.DictReader(path.open()))
         self.assertEqual(
             list(rows[0].keys()),
@@ -352,6 +357,7 @@ class TestWriteAuditCsv(unittest.TestCase):
                 "Running",
                 "Seq",
                 "Source",
+                "InReport",
             ],
         )
         self.assertEqual(len(rows), 4)
@@ -375,7 +381,8 @@ class TestWriteTransactionsCsv(unittest.TestCase):
         result = consolidate([make_stmt(), stmt2])
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "tx.csv"
-            _write_transactions_csv(result, path, mask_personal=True)
+            redactor = DataRedactor(mask_personal=True, redact_names=["JACOB PFEIFF"])
+            _write_transactions_csv(result, path, redactor=redactor)
             rows = list(csv.DictReader(path.open()))
         self.assertEqual(
             list(rows[0].keys()),
@@ -410,7 +417,7 @@ class TestWriteTransactionsCsv(unittest.TestCase):
         result = consolidate([stmt])
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "tx.csv"
-            _write_transactions_csv(result, path, mask_personal=False)
+            _write_transactions_csv(result, path, redactor=DataRedactor(mask_personal=False))
             rows = list(csv.DictReader(path.open()))
         self.assertEqual([r["Seq"] for r in rows], ["1", "2", "3"])
         previous = stmt.beginning_balance
@@ -425,7 +432,8 @@ class TestDuplicateDetailRows(unittest.TestCase):
         stmt2.statement_date = "03/31/2026"
         stmt2.transactions = [make_tx("01/02/2026", "RICHERS TRUCKING PAYROLL", "500.00", True, "600.00")]
         result = consolidate([make_stmt(), stmt2])
-        rows = _duplicate_detail_rows(result.ledgers, mask_personal=True)
+        redactor = DataRedactor(mask_personal=True, redact_names=["JACOB PFEIFF"])
+        rows = _duplicate_detail_rows(result.ledgers, redactor=redactor)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][1], "03/31/2026")
         self.assertEqual(rows[0][4], "Credit")

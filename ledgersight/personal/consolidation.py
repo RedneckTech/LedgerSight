@@ -11,6 +11,7 @@ calendar month, and pairs internal money movement between accounts.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -172,30 +173,71 @@ class ConsolidatedResult:
         return None
 
 
-def _dedupe(statements: list[Statement]) -> tuple[list[Transaction], list[DuplicateRecord]]:
-    """Remove transactions repeated across statements.
+def _statement_content_hash(stmt: Statement) -> str:
+    """Stable hash of a statement's identity-bearing content.
 
-    An identical transaction (same post date, description, amount and sign)
-    is kept from the earliest statement that lists it and dropped from all
-    later statements. Transactions that merely repeat within a single
-    statement (e.g. two same-day charges) are always kept.
+    Used to drop exact file duplicates and equivalent statements with
+    different filenames before transaction-level deduplication.
     """
-    ordered = sorted(statements, key=lambda s: _to_date(s.statement_date))
-    by_key: dict[tuple, list[tuple[str, Transaction]]] = defaultdict(list)
-    for stmt in ordered:
-        for tx in stmt.transactions:
-            key = (tx.post_date, tx.description, str(tx.amount), tx.is_credit)
-            by_key[key].append((stmt.statement_date, tx))
+    parts = [
+        stmt.institution,
+        stmt.account_number,
+        stmt.statement_date,
+        str(stmt.beginning_balance),
+        str(stmt.ending_balance),
+        str(stmt.total_credits),
+        str(stmt.total_debits),
+        str(stmt.credit_count),
+        str(stmt.debit_count),
+    ]
+    tx_parts = []
+    for tx in sorted(stmt.transactions, key=lambda t: (t.post_date, t.source_row, str(t.amount))):
+        tx_parts.append(f"{tx.post_date}|{tx.description}|{str(tx.amount)}|{tx.is_credit}|{tx.source_row}")
+    payload = "\n".join(parts + tx_parts)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+
+def _dedupe_statements(statements: list[Statement]) -> list[Statement]:
+    """Drop duplicate statement objects (exact file duplicates or equivalent PDFs).
+
+    Preserves the first occurrence ordered by statement date then file path.
+    """
+    ordered = sorted(statements, key=lambda s: (_to_date(s.statement_date), s.file_path or "", s.account_number))
+    seen: set[str] = set()
+    unique: list[Statement] = []
+    for stmt in ordered:
+        h = _statement_content_hash(stmt)
+        if h in seen:
+            continue
+        seen.add(h)
+        unique.append(stmt)
+    return unique
+
+
+def _dedupe(statements: list[Statement]) -> tuple[list[Transaction], list[DuplicateRecord]]:
+    """Remove transactions repeated across statements while preserving order.
+
+    Statements are first deduplicated by content hash so exact file copies
+    do not create phantom transactions. Remaining statements are processed
+    in date order; the first occurrence of an identical transaction (same
+    post date, description, amount and sign) is kept and later occurrences
+    are recorded as duplicates. Legitimate repeated charges within a single
+    statement are always kept, preserving their original source sequence.
+    """
+    ordered = sorted(statements, key=lambda s: (_to_date(s.statement_date), s.file_path or "", s.account_number))
+    seen: set[tuple] = set()
     unique: list[Transaction] = []
     dropped: list[DuplicateRecord] = []
-    for occurrences in by_key.values():
-        earliest = min(_to_date(end) for end, _ in occurrences)
-        for end_date, tx in occurrences:
-            if _to_date(end_date) == earliest:
-                unique.append(tx)
-            else:
-                dropped.append(DuplicateRecord(statement_date=end_date, transaction=tx))
+    for stmt in ordered:
+        stmt_seen: set[tuple] = set()
+        for tx in stmt.transactions:
+            key = (tx.post_date, tx.description, str(tx.amount), tx.is_credit)
+            if key in seen and key not in stmt_seen:
+                dropped.append(DuplicateRecord(statement_date=stmt.statement_date, transaction=tx))
+                continue
+            unique.append(tx)
+            seen.add(key)
+            stmt_seen.add(key)
     return unique, dropped
 
 
@@ -480,7 +522,7 @@ def consolidate(statements: list[Statement]) -> ConsolidatedResult:
 
     ledgers: list[AccountLedger] = []
     for (institution, account_number), group in groups.items():
-        stmts = sorted(group, key=lambda s: _to_date(s.statement_date))
+        stmts = _dedupe_statements(sorted(group, key=lambda s: _to_date(s.statement_date)))
         unique, dropped = _dedupe(stmts)
         unique.sort(key=lambda t: _to_date(t.post_date))
         ledger = AccountLedger(

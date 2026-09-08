@@ -57,6 +57,7 @@ from ledgersight.personal.insights import (
     subscription_review,
 )
 from ledgersight.personal.models import Statement, Transaction
+from ledgersight.redaction import DataRedactor
 
 EXCLUDED_MERCHANT_CATS = {
     "Transfers",
@@ -201,6 +202,55 @@ def _to_terminal(year: int, month: int) -> date:
     return date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
 
 
+def _tx_in_period(tx: Transaction, target_year: int | None, target_month: int | None) -> bool:
+    """True when a transaction's posting date falls inside the requested period."""
+    if target_year is None and target_month is None:
+        return True
+    parts = tx.post_date.split("/")
+    tx_year, tx_month = int(parts[2]), int(parts[0])
+    if target_year is not None and tx_year != target_year:
+        return False
+    if target_month is not None and tx_month != target_month:
+        return False
+    return True
+
+
+def _filter_result_by_period(
+    result: ConsolidatedResult,
+    target_year: int | None,
+    target_month: int | None,
+) -> ConsolidatedResult:
+    """Return a result whose activity is limited to the requested period.
+
+    Source statements are retained on the ledgers for reconciliation and
+    opening-balance reconstruction, but transactions, months and matched
+    movements are rebuilt from rows whose posting date falls in the period.
+    """
+    if target_year is None and target_month is None:
+        return result
+
+    from ledgersight.personal.consolidation import _month_buckets, match_movements
+
+    filtered_ledgers: list[AccountLedger] = []
+    for ledger in result.ledgers:
+        txs = [tx for tx in ledger.transactions if _tx_in_period(tx, target_year, target_month)]
+        filtered_ledgers.append(
+            AccountLedger(
+                institution=ledger.institution,
+                account_number=ledger.account_number,
+                account_type=ledger.account_type,
+                statements=ledger.statements,
+                transactions=txs,
+                duplicates=ledger.duplicates,
+                checks=ledger.checks,
+                months=_month_buckets(txs),
+            )
+        )
+    filtered_ledgers.sort(key=lambda led: (led.institution, led.account_number))
+    movements = match_movements(filtered_ledgers)
+    return ConsolidatedResult(ledgers=filtered_ledgers, movements=movements)
+
+
 def _merge_ledgers_by_month(ledgers: list[AccountLedger]) -> list[Statement]:
     """Build one synthetic Statement per calendar month from all ledgers.
 
@@ -267,7 +317,7 @@ def build_category_table_rows(statements: list[Statement]) -> list[list[str]]:
 def _build_top_merchants_from_tx(
     transactions: list[Transaction],
     top_n: int,
-    mask_personal: bool,
+    redactor: DataRedactor | None = None,
 ) -> list[list[str]]:
     merchant_totals: dict[str, Decimal] = defaultdict(Decimal)
     display_names: dict[str, set[str]] = defaultdict(set)
@@ -284,8 +334,7 @@ def _build_top_merchants_from_tx(
         sorted(merchant_totals.items(), key=lambda x: x[1], reverse=True)[:top_n], start=1
     ):
         desc = best_display_name(display_names.get(canon, ())) or canon
-        if mask_personal:
-            desc = _mask_desc(desc)
+        desc = _mask_desc(desc, redactor)
         desc_short = desc[:70] + ("..." if len(desc) > 70 else "")
         rows.append([str(rank), desc_short, fmt_dollar(amt)])
     return rows
@@ -294,34 +343,78 @@ def _build_top_merchants_from_tx(
 def build_top_merchants(
     statements: list[Statement],
     top_n: int = 15,
-    mask_personal: bool = False,
+    redactor: DataRedactor | None = None,
 ) -> list[list[str]]:
     """Build ranked payee rows by total debits."""
-    return _build_top_merchants_from_tx([tx for s in statements for tx in s.transactions], top_n, mask_personal)
+    return _build_top_merchants_from_tx([tx for s in statements for tx in s.transactions], top_n, redactor)
 
 
-def _statement_reconciles(stmt: Statement) -> tuple[bool, Decimal, Decimal, int, int]:
-    """Per-statement arithmetic check: parsed totals vs reported summary."""
+def _statement_reconciles(
+    stmt: Statement,
+) -> tuple[bool, Decimal, Decimal, int, int, Decimal, Decimal, bool]:
+    """Per-statement reconciliation: parsed totals/counts and ending balance.
+
+    For checking / savings accounts the balance formula is
+    ``beginning + credits - debits = ending``; for credit cards it is
+    ``beginning + debits - credits = ending`` because payments reduce the
+    balance owed while purchases increase it.
+    """
     parsed_credits = sum((tx.amount for tx in stmt.transactions if tx.is_credit), Decimal("0"))
     parsed_debits = sum((tx.amount for tx in stmt.transactions if not tx.is_credit), Decimal("0"))
     parsed_count = len(stmt.transactions)
     expected_count = stmt.credit_count + stmt.debit_count
-    ok = parsed_count == expected_count and parsed_credits == stmt.total_credits and parsed_debits == stmt.total_debits
-    return ok, parsed_credits, parsed_debits, parsed_count, expected_count
+    count_ok = parsed_count == expected_count
+    credit_total_ok = parsed_credits == stmt.total_credits
+    debit_total_ok = parsed_debits == stmt.total_debits
+
+    is_card = stmt.account_type == "Credit Card"
+    calculated_ending = (
+        stmt.beginning_balance + parsed_debits - parsed_credits
+        if is_card
+        else stmt.beginning_balance + parsed_credits - parsed_debits
+    )
+    balance_ok = abs(calculated_ending - stmt.ending_balance) <= Decimal("0.005")
+
+    ok = count_ok and credit_total_ok and debit_total_ok and balance_ok
+    return (
+        ok,
+        parsed_credits,
+        parsed_debits,
+        parsed_count,
+        expected_count,
+        calculated_ending,
+        stmt.ending_balance,
+        balance_ok,
+    )
 
 
 def _reconcile_statements(statements: list[Statement]) -> bool:
-    """Verify parsed transaction totals against statement summaries."""
+    """Verify parsed transaction totals/counts and ending balances."""
     passed = True
     for stmt in statements:
-        ok, parsed_credits, parsed_debits, parsed_count, expected_count = _statement_reconciles(stmt)
+        (
+            ok,
+            parsed_credits,
+            parsed_debits,
+            parsed_count,
+            expected_count,
+            calculated_ending,
+            expected_ending,
+            balance_ok,
+        ) = _statement_reconciles(stmt)
         if not ok:
             passed = False
+            parts: list[str] = []
+            if parsed_count != expected_count:
+                parts.append(f"parsed={parsed_count} expected={expected_count}")
+            if parsed_credits != stmt.total_credits:
+                parts.append(f"credits={parsed_credits}/{stmt.total_credits}")
+            if parsed_debits != stmt.total_debits:
+                parts.append(f"debits={parsed_debits}/{stmt.total_debits}")
+            if not balance_ok:
+                parts.append(f"ending={calculated_ending}/{expected_ending}")
             print(
-                f"WARNING: {stmt.month_label} reconciliation failed "
-                f"parsed={parsed_count} expected={expected_count} "
-                f"credits={parsed_credits}/{stmt.total_credits} "
-                f"debits={parsed_debits}/{stmt.total_debits}",
+                f"WARNING: {stmt.month_label} reconciliation failed " + " ".join(parts),
                 file=sys.stderr,
             )
     return passed
@@ -452,6 +545,7 @@ def _render_reconciliation(
     period_end_year: int,
     period_end_month: int,
     mask_personal: bool = False,
+    redactor: DataRedactor | None = None,
 ) -> None:
     """Render the reconciliation and data-quality panel."""
     pdf.add_page()
@@ -484,8 +578,8 @@ def _render_reconciliation(
     )
     pdf.body_text(
         "\u201cTotals\u201d compares each statement\u2019s parsed transactions with the bank\u2019s printed "
-        "credit/debit summary. \u201cBalances\u201d recomputes the balance after every transaction and compares it "
-        "with each statement\u2019s printed ending balance.",
+        "credit/debit summary. \u201cBalances\u201d validates the statement\u2019s opening balance plus/minus its "
+        "credit/debit totals against the printed ending balance.",
         size=8,
     )
     pdf.ln(2)
@@ -494,7 +588,9 @@ def _render_reconciliation(
     rows_all: list[list[str]] = []
     for ledger in result.ledgers:
         for stmt in ledger.statements:
-            ok, parsed_credits, parsed_debits, parsed_count, expected_count = _statement_reconciles(stmt)
+            ok, parsed_credits, parsed_debits, parsed_count, expected_count, calc_end, exp_end, bal_ok = (
+                _statement_reconciles(stmt)
+            )
             rows_all.append(
                 [
                     _ledger_short(ledger),
@@ -502,13 +598,25 @@ def _render_reconciliation(
                     _period_note(stmt, ledger),
                     "PASSED" if ok else "FAILED",
                     f"{parsed_count}/{expected_count}",
+                    fmt_dollar(calc_end),
+                    fmt_dollar(exp_end),
+                    "OK" if bal_ok else "FAIL",
                 ]
             )
     pdf.draw_table(
-        ["Account", "Period End", "Statement Period", "Result", "Tx (parsed/expected)"],
+        [
+            "Account",
+            "Period End",
+            "Statement Period",
+            "Result",
+            "Tx (parsed/expected)",
+            "Calc Ending",
+            "Printed Ending",
+            "Balance",
+        ],
         rows_all,
-        col_widths=[44, 25, 52, 18, 33],
-        col_aligns=["L", "L", "L", "L", "R"],
+        col_widths=[36, 22, 44, 16, 26, 24, 24, 16],
+        col_aligns=["L", "L", "L", "L", "R", "R", "R", "L"],
         row_font_size=7,
         row_height=4.5,
     )
@@ -547,7 +655,7 @@ def _render_reconciliation(
             "another. Identical transactions are kept from the earliest statement that lists them.",
             size=8,
         )
-        dup_detail = _duplicate_detail_rows(result.ledgers, mask_personal)
+        dup_detail = _duplicate_detail_rows(result.ledgers, redactor)
         if dup_detail:
             pdf.ln(1)
             detail_height = 10 + len(dup_detail) * 4.5 + 12
@@ -749,7 +857,13 @@ def _income_to_cash_bridge(totals: dict[str, Any], flow: dict[str, Decimal]) -> 
     ]
 
 
-def _render_dashboard(pdf: ReportPDF, result: ConsolidatedResult, start: date, end: date) -> None:
+def _render_dashboard(
+    pdf: ReportPDF,
+    result: ConsolidatedResult,
+    start: date,
+    end: date,
+    redactor: DataRedactor | None = None,
+) -> None:
     """One-page at-a-glance: credit/debit breakdown, income-to-cash bridge,
     snapshot, month-by-month table and month-end balances by account."""
     pdf.add_page()
@@ -977,7 +1091,12 @@ def _render_budget(
         )
 
 
-def _render_recurring_and_forecast(pdf: ReportPDF, result: ConsolidatedResult, end: date) -> None:
+def _render_recurring_and_forecast(
+    pdf: ReportPDF,
+    result: ConsolidatedResult,
+    end: date,
+    redactor: DataRedactor | None = None,
+) -> None:
     """Detected recurring payments and a near-term cash forecast."""
     pdf.add_page()
     pdf.section_title("Recurring Payments & Forecast")
@@ -1001,7 +1120,7 @@ def _render_recurring_and_forecast(pdf: ReportPDF, result: ConsolidatedResult, e
     pdf.sub_title("Detected Recurring Payments")
     rep_rows = [
         [
-            r.payee,
+            _mask_desc(r.payee, redactor),
             r.category,
             "Income" if r.income else "Bill",
             _cadence_label(r.cadence_days),
@@ -1037,8 +1156,11 @@ def _render_recurring_and_forecast(pdf: ReportPDF, result: ConsolidatedResult, e
         pdf.ln(2)
         pdf.sub_title(f"Near-Term Cash Forecast (next {FORECAST_HORIZON_DAYS} days) \u2013 scheduled items")
         income_notes = "; ".join(
-            f"{display_merchant(e.payee)}: {e.occurrences} distinct pay dates in the last 9 weeks, "
-            f"median every {e.median_cadence_days} days, median {fmt_dollar(e.median_amount)} per payday"
+            (
+                f"{_mask_desc(display_merchant(e.payee), redactor)}: {e.occurrences} distinct pay dates "
+                f"in the last 9 weeks, median every {e.median_cadence_days} days, "
+                f"median {fmt_dollar(e.median_amount)} per payday"
+            )
             for e in estimated
         )
         pdf.body_text(
@@ -1060,7 +1182,7 @@ def _render_recurring_and_forecast(pdf: ReportPDF, result: ConsolidatedResult, e
         fc_rows = [
             [
                 f"{e.event_date:%m/%d/%Y}",
-                e.payee,
+                _mask_desc(e.payee, redactor),
                 "+" if e.income else "\u2212",
                 fmt_dollar(e.amount),
                 fmt_dollar(e.projected),
@@ -1194,6 +1316,7 @@ def _render_action_summary(
     result: ConsolidatedResult,
     end: date,
     check_annotations: dict[int, dict[str, str]],
+    redactor: DataRedactor | None = None,
 ) -> None:
     """One page up front: the next decisions, what is due soon, what is missing."""
     pdf.add_page()
@@ -1341,7 +1464,12 @@ def _render_action_summary(
         pdf.body_text("Nothing outstanding - every account and month is covered and every check is annotated.", size=8)
 
 
-def _render_subscription_review(pdf: ReportPDF, result: ConsolidatedResult, end: date) -> None:
+def _render_subscription_review(
+    pdf: ReportPDF,
+    result: ConsolidatedResult,
+    end: date,
+    redactor: DataRedactor | None = None,
+) -> None:
     """Every subscription service with its cost, cadence and a keep/cancel column."""
     repeating = detect_repeating_payments(result.all_transactions, as_of=end)
     rows = subscription_review(result, repeating, end)
@@ -1358,7 +1486,7 @@ def _render_subscription_review(pdf: ReportPDF, result: ConsolidatedResult, end:
     )
     table = [
         [
-            r.payee,
+            _mask_desc(r.payee, redactor),
             r.accounts,
             str(r.charges),
             fmt_dollar(r.total),
@@ -1394,7 +1522,12 @@ def _render_subscription_review(pdf: ReportPDF, result: ConsolidatedResult, end:
     )
 
 
-def _render_bills_and_debt(pdf: ReportPDF, result: ConsolidatedResult, end: date) -> None:
+def _render_bills_and_debt(
+    pdf: ReportPDF,
+    result: ConsolidatedResult,
+    end: date,
+    redactor: DataRedactor | None = None,
+) -> None:
     """Debt log (per card) and a 60-day calendar of bills, minimums and paydays."""
     repeating = detect_repeating_payments(result.all_transactions, as_of=end)
     estimated = estimate_income_groups(result.all_transactions, end)
@@ -1452,7 +1585,7 @@ def _render_bills_and_debt(pdf: ReportPDF, result: ConsolidatedResult, end: date
             [
                 [
                     f"{c.when:%m/%d/%Y}",
-                    c.item,
+                    _mask_desc(c.item, redactor),
                     "+" if "Payday" in c.kind else "\u2212",
                     fmt_dollar(c.amount),
                     c.kind,
@@ -1469,7 +1602,12 @@ def _render_bills_and_debt(pdf: ReportPDF, result: ConsolidatedResult, end: date
         )
 
 
-def _render_checks(pdf: ReportPDF, result: ConsolidatedResult, annotations: dict[int, dict[str, str]]) -> None:
+def _render_checks(
+    pdf: ReportPDF,
+    result: ConsolidatedResult,
+    annotations: dict[int, dict[str, str]],
+    redactor: DataRedactor | None = None,
+) -> None:
     """Register of cleared checks with payee/purpose where annotated."""
     rows = check_register(result, annotations)
     if not rows:
@@ -1497,8 +1635,8 @@ def _render_checks(pdf: ReportPDF, result: ConsolidatedResult, annotations: dict
                 r.date,
                 f"#{r.number}",
                 fmt_dollar(r.amount),
-                r.payee or "unknown \u2013 supply",
-                r.purpose or "unknown",
+                _mask_desc(r.payee or "unknown \u2013 supply", redactor),
+                _mask_desc(r.purpose or "unknown", redactor),
                 r.account,
                 r.source or "\u2013",
             ]
@@ -1511,7 +1649,12 @@ def _render_checks(pdf: ReportPDF, result: ConsolidatedResult, annotations: dict
     )
 
 
-def _render_items_needing_review(pdf: ReportPDF, result: ConsolidatedResult, mask_personal: bool = False) -> None:
+def _render_items_needing_review(
+    pdf: ReportPDF,
+    result: ConsolidatedResult,
+    mask_personal: bool = False,
+    redactor: DataRedactor | None = None,
+) -> None:
     """Actionable list of transactions and statements that warrant manual review."""
     pdf.add_page()
     pdf.section_title("Items Needing Review")
@@ -1555,7 +1698,7 @@ def _render_items_needing_review(pdf: ReportPDF, result: ConsolidatedResult, mas
         for tx in ledger.transactions:
             if tx.category != "Other":
                 continue
-            desc = _mask_desc(tx.description) if mask_personal else tx.description
+            desc = _mask_desc(tx.description, redactor)
             rows.append(
                 [
                     _ledger_short(ledger),
@@ -1563,14 +1706,14 @@ def _render_items_needing_review(pdf: ReportPDF, result: ConsolidatedResult, mas
                     fmt_dollar(tx.amount),
                     desc[:60],
                     "Category not recognized \u2013 verify and recategorize",
-                    _statement_source_for(ledger, tx),
+                    _statement_source_for(ledger, tx, redactor=redactor),
                     "Unresolved",
                 ]
             )
 
     for ledger in result.ledgers:
         for stmt in ledger.statements:
-            ok, _, _, _, _ = _statement_reconciles(stmt)
+            ok, _, _, _, _, _, _, _ = _statement_reconciles(stmt)
             if not ok:
                 rows.append(
                     [
@@ -1578,8 +1721,8 @@ def _render_items_needing_review(pdf: ReportPDF, result: ConsolidatedResult, mas
                         stmt.statement_date,
                         "\u2013",
                         _period_note(stmt, ledger)[:60],
-                        "Statement printed totals/counts differ from parsed transactions",
-                        Path(stmt.file_path).name if stmt.file_path else f"statement {stmt.statement_date}",
+                        "Statement printed totals/counts/balance differ from parsed transactions",
+                        _redact_filename(redactor, stmt.file_path),
                         "Verify arithmetic",
                     ]
                 )
@@ -1591,9 +1734,9 @@ def _render_items_needing_review(pdf: ReportPDF, result: ConsolidatedResult, mas
                     _ledger_short(ledger),
                     issue["post_date"],
                     issue["amount"],
-                    issue["description"],
+                    _mask_desc(issue["description"], redactor),
                     f"Transaction {issue['problem']}",
-                    issue["source"],
+                    _mask_desc(issue["source"], redactor),
                     "Unresolved",
                 ]
             )
@@ -1629,9 +1772,9 @@ def _render_items_needing_review(pdf: ReportPDF, result: ConsolidatedResult, mas
                 label,
                 movement.date,
                 fmt_dollar(movement.amount),
-                movement.description[:60],
+                _mask_desc(movement.description[:60], redactor),
                 f"Transfer/card payment without an offsetting credit: {reason}",
-                source,
+                _mask_desc(source, redactor),
                 status,
             ]
         )
@@ -1653,11 +1796,15 @@ def _render_items_needing_review(pdf: ReportPDF, result: ConsolidatedResult, mas
     )
 
 
-def _source_ref(stmt: Statement | None, tx: Transaction | None = None) -> str:
+def _source_ref(
+    stmt: Statement | None,
+    tx: Transaction | None = None,
+    redactor: DataRedactor | None = None,
+) -> str:
     """Exact provenance: file name, PDF page and row ordinal when known."""
     if stmt is None:
         return "\u2013"
-    name = Path(stmt.file_path).name if stmt.file_path else f"statement {stmt.statement_date}"
+    name = _redact_filename(redactor, stmt.file_path) if stmt.file_path else f"statement {stmt.statement_date}"
     if tx is not None and tx.source_page:
         return f"{name} p.{tx.source_page} row {tx.source_row}"
     return name
@@ -1681,9 +1828,13 @@ def _statement_for_tx(ledger: AccountLedger, tx: Transaction) -> Statement | Non
     return best
 
 
-def _statement_source_for(ledger: AccountLedger, tx: Transaction) -> str:
+def _statement_source_for(
+    ledger: AccountLedger,
+    tx: Transaction,
+    redactor: DataRedactor | None = None,
+) -> str:
     """Locate the statement row a transaction was read from."""
-    return _source_ref(_statement_for_tx(ledger, tx), tx)
+    return _source_ref(_statement_for_tx(ledger, tx), tx, redactor=redactor)
 
 
 def _movement_source(result: ConsolidatedResult, movement: MovementMatch) -> str:
@@ -1702,7 +1853,12 @@ def _movement_source(result: ConsolidatedResult, movement: MovementMatch) -> str
     return "\u2013"
 
 
-def _render_corrections_log(pdf: ReportPDF, result: ConsolidatedResult, mask_personal: bool = False) -> None:
+def _render_corrections_log(
+    pdf: ReportPDF,
+    result: ConsolidatedResult,
+    mask_personal: bool = False,
+    redactor: DataRedactor | None = None,
+) -> None:
     """Chronological log of data-quality findings and the adjustments applied."""
     pdf.add_page()
     pdf.section_title("Corrections & Adjustments Log")
@@ -1712,7 +1868,7 @@ def _render_corrections_log(pdf: ReportPDF, result: ConsolidatedResult, mask_per
             return "\u2013"
         for stmt in ledger.statements:
             if stmt.statement_date == statement_date:
-                return Path(stmt.file_path).name if stmt.file_path else f"statement {statement_date}"
+                return _redact_filename(redactor, stmt.file_path)
         return f"statement {statement_date}"
 
     entries: list[list[str]] = []
@@ -1745,15 +1901,18 @@ def _render_corrections_log(pdf: ReportPDF, result: ConsolidatedResult, mask_per
                     mismatch[1],
                     _ledger_short(ledger),
                     "Running balance",
-                    f"{mismatch[2]} \u2013 printed {mismatch[3]} vs recomputed {mismatch[4]} ({mismatch[5]})",
+                    (
+                        f"{_mask_desc(mismatch[2], redactor)} \u2013 printed {mismatch[3]} vs recomputed "
+                        f"{mismatch[4]} ({mismatch[5]})"
+                    ),
                     action,
-                    mismatch[6],
+                    _mask_desc(mismatch[6], redactor),
                 ]
             )
 
     for ledger in result.ledgers:
         for dup in ledger.duplicates:
-            desc = _mask_desc(dup.transaction.description) if mask_personal else dup.transaction.description
+            desc = _mask_desc(dup.transaction.description, redactor)
             entries.append(
                 [
                     dup.transaction.post_date,
@@ -1767,14 +1926,14 @@ def _render_corrections_log(pdf: ReportPDF, result: ConsolidatedResult, mask_per
 
     for ledger in result.ledgers:
         for stmt in ledger.statements:
-            ok, _, _, _, _ = _statement_reconciles(stmt)
+            ok, _, _, _, _, _, _, _ = _statement_reconciles(stmt)
             if not ok:
                 entries.append(
                     [
                         stmt.statement_date,
                         _ledger_short(ledger),
                         "Statement arithmetic",
-                        "Printed credits/debits or counts differ from parsed values",
+                        "Printed totals/counts/balance differ from parsed values",
                         "Parsed transaction stream treated as authoritative",
                         _stmt_source(ledger, stmt.statement_date),
                     ]
@@ -1828,14 +1987,8 @@ def generate_report(
     """
     pdf = ReportPDF("Personal Financial Report")
 
-    # Filter by year/month if requested
-    if target_year:
-        statements = [s for s in statements if s.year == target_year]
-    if target_month:
-        statements = [s for s in statements if s.month == target_month]
-
     if not statements:
-        print("No statements found matching filters.", file=sys.stderr)
+        print("No statements found.", file=sys.stderr)
         sys.exit(1)
 
     statements.sort(key=lambda s: (s.year, s.month, s.account_number))
@@ -1843,7 +1996,7 @@ def generate_report(
     check_annotations = load_check_annotations(checks_path)
     apply_check_annotations(statements, check_annotations)
 
-    # Per-statement reconciliation
+    # Per-statement reconciliation (uses every provided statement)
     reconciled = _reconcile_statements(statements)
     if not reconciled:
         print("WARNING: reconciliation failed (see above).", file=sys.stderr)
@@ -1854,7 +2007,14 @@ def generate_report(
             )
             sys.exit(1)
 
-    result = consolidate(statements)
+    full_result = consolidate(statements)
+    result = _filter_result_by_period(full_result, target_year, target_month)
+
+    if not result.all_transactions:
+        print("No transactions found matching period filters.", file=sys.stderr)
+        sys.exit(1)
+
+    redactor = _build_redactor(statements, mask_personal)
 
     end_stmt = max(result.all_statements, key=lambda s: _to_date(s.statement_date))
     first_stmt = min(result.all_statements, key=lambda s: _to_date(s.statement_date))
@@ -2017,16 +2177,16 @@ def generate_report(
 
     # Reconciliation summary on cover
     if allow_mismatch:
-        pdf.body_text("Reconciliation: SKIPPED (--allow-mismatch)", size=9)
+        pdf.body_text("Reconciliation: UNVALIDATED (--allow-mismatch)", size=9)
     elif reconciled:
-        pdf.body_text("Reconciliation: PASSED (statement totals and reconstructed balances)", size=9)
+        pdf.body_text("Reconciliation: PASSED (statement totals, counts, and balance formulas)", size=9)
     else:
         pdf.body_text("Reconciliation: FAILED (see Reconciliation & Data Quality page)", size=9)
 
     # ---- ACTION SUMMARY + DASHBOARD ----
     if mode in ("combined", "yearly"):
-        _render_action_summary(pdf, result, cover_end_d, check_annotations)
-        _render_dashboard(pdf, result, cover_start_d, cover_end_d)
+        _render_action_summary(pdf, result, cover_end_d, check_annotations, redactor=redactor)
+        _render_dashboard(pdf, result, cover_start_d, cover_end_d, redactor=redactor)
         _render_budget(pdf, load_budget(budget_path), result, cover_start_d, cover_end_d)
 
         aggregated = _merge_ledgers_by_month(result.ledgers)
@@ -2083,7 +2243,7 @@ def generate_report(
 
         pdf.add_page()
         pdf.sub_title("Top Payees by Total Debits (All Covered Accounts)")
-        merchant_rows = _build_top_merchants_from_tx(result.all_transactions, top_n=15, mask_personal=mask_personal)
+        merchant_rows = _build_top_merchants_from_tx(result.all_transactions, top_n=15, redactor=redactor)
         cw_merch = [10, 120, 35]
         pdf.draw_table(
             ["#", "Payee", "Total"],
@@ -2095,15 +2255,17 @@ def generate_report(
 
     # ---- INSIGHTS: SUBSCRIPTIONS, BILLS & DEBT, CHECKS, REVIEW, FORECAST ----
     if mode in ("combined", "yearly"):
-        _render_subscription_review(pdf, result, cover_end_d)
-        _render_bills_and_debt(pdf, result, cover_end_d)
-        _render_checks(pdf, result, check_annotations)
-        _render_items_needing_review(pdf, result, mask_personal=mask_personal)
-        _render_recurring_and_forecast(pdf, result, cover_end_d)
+        _render_subscription_review(pdf, result, cover_end_d, redactor=redactor)
+        _render_bills_and_debt(pdf, result, cover_end_d, redactor=redactor)
+        _render_checks(pdf, result, check_annotations, redactor=redactor)
+        _render_items_needing_review(pdf, result, mask_personal=mask_personal, redactor=redactor)
+        _render_recurring_and_forecast(pdf, result, cover_end_d, redactor=redactor)
 
     # ---- RECONCILIATION PANEL ----
-    _render_reconciliation(pdf, result, period_end_year, period_end_month, mask_personal=mask_personal)
-    _render_corrections_log(pdf, result, mask_personal=mask_personal)
+    _render_reconciliation(
+        pdf, result, period_end_year, period_end_month, mask_personal=mask_personal, redactor=redactor
+    )
+    _render_corrections_log(pdf, result, mask_personal=mask_personal, redactor=redactor)
 
     # ---- MONTHLY DETAIL ----
     if mode in ("combined", "monthly"):
@@ -2199,7 +2361,7 @@ def generate_report(
                     )
 
                 # Top merchants for this month
-                merchant_m = _build_top_merchants_from_tx(month.transactions, top_n=10, mask_personal=mask_personal)
+                merchant_m = _build_top_merchants_from_tx(month.transactions, top_n=10, redactor=redactor)
                 if merchant_m:
                     pdf.sub_title("Top Payees by Total Debits")
                     cw_mm = [10, 120, 35]
@@ -2242,9 +2404,7 @@ def generate_report(
                 )
                 tx_rows = []
                 for tx in shown:
-                    raw_desc = tx.description
-                    if mask_personal:
-                        raw_desc = _mask_desc(raw_desc)
+                    raw_desc = _mask_desc(tx.description, redactor)
                     desc = raw_desc[:90] + ("..." if len(raw_desc) > 90 else "")
                     sign = "+" if tx.is_credit else "-"
                     tx_rows.append(
@@ -2275,19 +2435,29 @@ def generate_report(
         run_maps_audit.update(running_balance_map(ledger))
         seq_maps_audit.update({id(tx): seq for seq, tx in enumerate(ledger.transactions, start=1)})
 
+    included_tx_ids = {id(tx) for tx in result.all_transactions}
+
     attachments = []
     if transactions_csv_path:
-        _write_transactions_csv(result, transactions_csv_path, mask_personal)
+        _write_transactions_csv(result, transactions_csv_path, redactor=redactor)
         attachments.append(transactions_csv_path)
     if audit_path:
-        _write_audit_csv(statements, audit_path, mask_personal, run_maps_audit, seq_maps_audit)
+        _write_audit_csv(
+            statements,
+            audit_path,
+            redactor=redactor,
+            run_maps=run_maps_audit,
+            seq_maps=seq_maps_audit,
+            included_tx_ids=included_tx_ids,
+        )
         attachments.append(audit_path)
 
     # Package the companion CSVs inside the PDF so a standalone PDF carries
-    # the full audited transaction stream with it.
+    # the full audited transaction stream with it. The attachment description
+    # is redacted so the PDF metadata does not leak source filenames.
     for attach in attachments:
         try:
-            pdf.embed_file(file_path=str(attach))
+            pdf.embed_file(file_path=str(attach), desc=_redact_filename(redactor, attach))
         except (OSError, ValueError) as exc:
             print(f"Note: could not attach {attach}: {exc}", file=sys.stderr)
 
@@ -2303,7 +2473,10 @@ def generate_report(
 
     pdf.output(str(output_path))
     print(f"Report saved to: {output_path}")
-    return not check_problems
+    success = reconciled and not check_problems
+    if not success:
+        print("WARNING: report generation completed with validation failures.", file=sys.stderr)
+    return success
 
 
 def _post_render_checks(result: ConsolidatedResult, as_of: date, pdf: ReportPDF | None = None) -> tuple[list[str], int]:
@@ -2378,28 +2551,75 @@ def _post_render_checks(result: ConsolidatedResult, as_of: date, pdf: ReportPDF 
     return problems, checks
 
 
-def _mask_desc(description: str) -> str:
+def _mask_desc(description: str, redactor: DataRedactor | None = None) -> str:
     """Redact names and addresses from transaction descriptions."""
-    desc = description
-    desc = re.sub(r"JACOB PFEIFF", "[NAME REDACTED]", desc, flags=re.IGNORECASE)
-    desc = re.sub(r"PFEIFF", "[NAME REDACTED]", desc, flags=re.IGNORECASE)
-    desc = re.sub(
-        r"\b\d+\s+(?:[NSEW]\s+)?"
-        r"[A-Z0-9.'-]+(?:\s+[A-Z0-9.'-]+){0,4}\s+"
-        r"(?:RD|ROAD|ST|STREET|AVE|AVENUE|DR|DRIVE|LN|LANE|"
-        r"WAY|BLVD|BOULEVARD)\b",
-        "[ADDRESS REDACTED]",
-        desc,
-        flags=re.IGNORECASE,
-    )
-    desc = re.sub(r"\bX{2,}\d{4}\b", "[ID REDACTED]", desc)
-    return desc
+    if redactor is None:
+        return description
+    return redactor.description(description)
+
+
+def _extract_person_names(statements: list[Statement]) -> list[str]:
+    """Heuristic extraction of personal names printed on statement headers.
+
+    Looks for all-caps name lines in the first few lines of each statement
+    text (e.g. ``JACOB PFEIFF`` or ``JACOB C PFEIFF``). These become the
+    default redaction targets when ``--mask`` is used without an explicit
+    name list.
+    """
+    names: set[str] = set()
+    name_re = re.compile(r"^[A-Z][A-Z\s]+[A-Z]$")
+    for stmt in statements:
+        if not stmt.file_path:
+            continue
+        try:
+            from ledgersight.parsers import extract_text
+
+            text = extract_text(Path(stmt.file_path))
+        except Exception:
+            continue
+        for line in text.split("\n")[:40]:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if (
+                name_re.match(stripped)
+                and "STATEMENT" not in stripped
+                and "CHECKING" not in stripped
+                and "SAVINGS" not in stripped
+                and "ACCOUNT" not in stripped
+                and "XXXX" not in stripped
+                and "BASIC" not in stripped
+                and "RETURN" not in stripped
+                and len(stripped) > 3
+            ):
+                names.add(" ".join(stripped.split()))
+    return sorted(names)
+
+
+def _build_redactor(statements: list[Statement], mask_personal: bool) -> DataRedactor:
+    """Build a redactor for the personal report.
+
+    Auto-detects names from statement headers and uses consistent pseudonyms
+    for source files so masked reports do not leak identities.
+    """
+    if not mask_personal:
+        return DataRedactor(mask_personal=False)
+    names = _extract_person_names(statements)
+    return DataRedactor(mask_personal=True, redact_names=names, redact_email=True, redact_phone_numbers=True)
+
+
+def _redact_filename(redactor: DataRedactor | None, path: str | Path) -> str:
+    """Return a display name for a source file, redacted when masking is on."""
+    name = Path(path).name if path else "statement"
+    if redactor is None or not redactor.mask_personal:
+        return name
+    return redactor.source_path(str(path))
 
 
 def _write_transactions_csv(
     result: ConsolidatedResult,
     transactions_path: str | Path,
-    mask_personal: bool,
+    redactor: DataRedactor | None = None,
 ) -> None:
     """Write the consolidated, deduplicated transactions to CSV.
 
@@ -2409,6 +2629,8 @@ def _write_transactions_csv(
     they do in the report. ``Source`` points at the statement file, page and
     row the transaction was read from.
     """
+    from ledgersight.exports import _safe_csv_cell
+
     with open(transactions_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(
@@ -2417,7 +2639,7 @@ def _write_transactions_csv(
         for ledger in result.ledgers:
             run_balances = running_balance_map(ledger)
             for seq, tx in enumerate(ledger.transactions, start=1):
-                desc = _mask_desc(tx.description) if mask_personal else tx.description
+                desc = _mask_desc(tx.description, redactor)
                 amount = tx.amount if tx.is_credit else -tx.amount
                 writer.writerow(
                     [
@@ -2425,24 +2647,24 @@ def _write_transactions_csv(
                         ledger.account_type,
                         seq,
                         tx.post_date,
-                        desc,
-                        tx.category,
+                        _safe_csv_cell(desc),
+                        _safe_csv_cell(tx.category),
                         str(amount),
                         "Credit" if tx.is_credit else "Debit",
                         str(run_balances[id(tx)]),
-                        _statement_source_for(ledger, tx),
+                        _safe_csv_cell(_statement_source_for(ledger, tx, redactor=redactor)),
                     ]
                 )
     print(f"Transactions CSV saved to: {transactions_path}")
 
 
-def _duplicate_detail_rows(ledgers: list[AccountLedger], mask_personal: bool) -> list[list[str]]:
+def _duplicate_detail_rows(ledgers: list[AccountLedger], redactor: DataRedactor | None = None) -> list[list[str]]:
     """Individual rows removed as duplicates, for the reconciliation panel."""
     rows: list[list[str]] = []
     for ledger in ledgers:
         for dup in ledger.duplicates:
             tx = dup.transaction
-            desc = _mask_desc(tx.description) if mask_personal else tx.description
+            desc = _mask_desc(tx.description, redactor)
             rows.append(
                 [
                     _ledger_short(ledger),
@@ -2460,9 +2682,10 @@ def _duplicate_detail_rows(ledgers: list[AccountLedger], mask_personal: bool) ->
 def _write_audit_csv(
     statements: list[Statement],
     audit_path: str | Path,
-    mask_personal: bool,
+    redactor: DataRedactor | None = None,
     run_maps: dict[int, Decimal] | None = None,
     seq_maps: dict[int, int] | None = None,
+    included_tx_ids: set[int] | None = None,
 ) -> None:
     """Write a CSV of every parsed row (statement order) with its category.
 
@@ -2471,9 +2694,15 @@ def _write_audit_csv(
     balance and ``Seq`` the row's position in the ledger's calculation order
     (blank for rows dropped as duplicates), so printed vs report-generated
     values stay distinguishable and the two CSVs can be joined.
+
+    ``InReport`` is ``Yes`` when the row's posting date is inside the requested
+    report period and it was included in report totals, otherwise ``No``.
     """
+    from ledgersight.exports import _safe_csv_cell
+
     run_maps = run_maps or {}
     seq_maps = seq_maps or {}
+    included_tx_ids = included_tx_ids or set()
     with open(audit_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(
@@ -2489,28 +2718,31 @@ def _write_audit_csv(
                 "Running",
                 "Seq",
                 "Source",
+                "InReport",
             ]
         )
         for stmt in statements:
-            name = Path(stmt.file_path).name if stmt.file_path else f"statement {stmt.statement_date}"
+            name = _redact_filename(redactor, stmt.file_path)
             for tx in stmt.transactions:
-                desc = _mask_desc(tx.description) if mask_personal else tx.description
+                desc = _mask_desc(tx.description, redactor)
                 amount = tx.amount if tx.is_credit else -tx.amount
                 running = run_maps.get(id(tx))
                 seq = seq_maps.get(id(tx))
+                in_report = "Yes" if id(tx) in included_tx_ids else "No"
                 writer.writerow(
                     [
                         stmt.account_number,
                         stmt.month_label,
                         tx.post_date,
-                        desc,
+                        _safe_csv_cell(desc),
                         str(amount),
                         "Credit" if tx.is_credit else "Debit",
                         str(tx.balance) if tx.balance is not None else "",
-                        tx.category,
+                        _safe_csv_cell(tx.category),
                         str(running) if running is not None else "",
                         str(seq) if seq is not None else "",
-                        f"{name} p.{tx.source_page} row {tx.source_row}" if tx.source_page else name,
+                        _safe_csv_cell(f"{name} p.{tx.source_page} row {tx.source_row}" if tx.source_page else name),
+                        in_report,
                     ]
                 )
     print(f"Audit file saved to: {audit_path}")
